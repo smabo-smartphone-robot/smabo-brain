@@ -18,10 +18,15 @@ smabo-app  ──►  smabo-brain  ◄──  smabo-web
 | パス | 接続元 | 役割 |
 |------|--------|------|
 | `/` | smabo-app | センサデータ（IMU/GPS/カメラ）送信 → web へ中継 |
-| `/ui` | smabo-web | 制御指令・設定送信 → esp32 へ中継、フィードバック受信 |
+| `/ui` | smabo-web | 制御指令送信 → esp32 へ中継、フィードバック受信 |
 | `/esp32` | smabo-esp32 | 制御指令受信、`/wheel_vel`・`/joint_states` 等を送信 |
 
 メッセージ形式は rosbridge v2.0 互換 JSON。
+
+設定（config / mode）は brain を経由しません。smabo-web は ESP32 の REST API
+（`http://<esp32>/config`・`/mode`）へ直接アクセスします。brain はオドメトリ積分に
+必要な車輪ジオメトリ等のため、ESP32 が WebSocket で push してくる config スナップショット
+（`set_config`）を内部の同期にのみ使います。
 
 ## 送信元 prefix
 
@@ -37,10 +42,18 @@ brain はこの prefix を**剥がしてから** canonical なトピック名で
 
 - **オドメトリ積分**: smabo-esp32 が送る `/wheel_vel`（left/right m/s, dt）を受信し、
   `brain/odometry.py` で x/y/θ を積分して nav_msgs/Odometry 形式の `/odom` を web へ送出します。
-  ホイール径などのパラメータは esp32 の `set_config` 応答から自動同期します。
+  ホイール径などのパラメータは、esp32 が接続時・設定変更時に push する config スナップショット
+  （`set_config`）から自動同期します（config 自体の読み書きは web ↔ esp32 の REST 直通）。
   （将来 IMU/GPS とのフュージョンをここに追加できます）
 
 ## 起動
+
+```bash
+./run.sh                 # 初回は venv 作成＋依存導入、以降はそのまま起動
+./run.sh --port 9091     # 引数は python -m brain に渡る（--host / --port）
+```
+
+手動で行う場合:
 
 ```bash
 pip3 install -r requirements.txt

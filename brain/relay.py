@@ -1,10 +1,11 @@
-import asyncio
 import json
 import logging
+import math
+import time
 import aiohttp
 from aiohttp import web
 
-from .odometry import Odometry
+from .odometry import Odometry, build_pose_covariance, build_twist_covariance
 
 log = logging.getLogger(__name__)
 
@@ -17,8 +18,42 @@ _APP_TOPICS = {'/speech/say', '/expression'}
 
 _odom = Odometry()
 
-# get_config サービス呼び出しの待ちキュー
-_config_waiters: list[asyncio.Future] = []
+
+def _odom_frame(r: dict) -> str:
+    """Build a rosbridge ``/odom`` publish frame (JSON text) from integrator values.
+
+    Wall-clock stamping and the nav_msgs/Odometry layout live here (transport
+    side); the integrator in odometry.py stays time- and format-agnostic so
+    smabo-brain-ros can reuse it with ROS time + tf instead.
+    """
+    now = time.time()
+    qz = math.sin(r["theta"] / 2.0)
+    qw = math.cos(r["theta"] / 2.0)
+    return json.dumps({
+        "op": "publish",
+        "topic": "/odom",
+        "msg": {
+            "header": {
+                "stamp": {"sec": int(now), "nanosec": int((now % 1) * 1e9)},
+                "frame_id": r["odom_frame"],
+            },
+            "child_frame_id": r["base_frame"],
+            "pose": {
+                "pose": {
+                    "position":    {"x": r["x"], "y": r["y"], "z": 0.0},
+                    "orientation": {"x": 0.0, "y": 0.0, "z": qz, "w": qw},
+                },
+                "covariance": build_pose_covariance(r["cov"]),
+            },
+            "twist": {
+                "twist": {
+                    "linear":  {"x": r["vx"], "y": 0.0, "z": 0.0},
+                    "angular": {"x": 0.0, "y": 0.0, "z": r["wz"]},
+                },
+                "covariance": build_twist_covariance(r["cov"]),
+            },
+        },
+    })
 
 
 def _strip_prefix(topic: str, prefix: str) -> str:
@@ -96,9 +131,7 @@ async def _ui_ws(request: web.Request) -> web.WebSocketResponse:
 
                 op = frame.get("op")
 
-                if op == "call_service":
-                    await _handle_service_call(ws, frame)
-                elif op == "publish":
+                if op == "publish":
                     topic = _strip_prefix(frame.get("topic", ""), "/web")
                     frame["topic"] = topic
                     data = json.dumps(frame)
@@ -115,57 +148,6 @@ async def _ui_ws(request: web.Request) -> web.WebSocketResponse:
         _ui_clients.discard(ws)
         log.info("UI disconnected (total=%d)", len(_ui_clients))
     return ws
-
-
-async def _handle_service_call(ws: web.WebSocketResponse, frame: dict) -> None:
-    call_id = frame.get("id", "")
-    service  = frame.get("service", "")
-    args     = frame.get("args") or {}
-
-    if service == "/esp32/get_config":
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        _config_waiters.append(fut)
-        await _broadcast(_esp32_clients, json.dumps({"op": "get_config"}))
-        try:
-            config = await asyncio.wait_for(fut, timeout=5.0)
-            await ws.send_str(json.dumps({
-                "op": "service_response",
-                "id": call_id,
-                "result": True,
-                "values": {"config": config},
-            }))
-        except asyncio.TimeoutError:
-            log.warning("get_config timeout (id=%s)", call_id)
-            await ws.send_str(json.dumps({
-                "op": "service_response",
-                "id": call_id,
-                "result": False,
-                "values": {},
-            }))
-        finally:
-            try:
-                _config_waiters.remove(fut)
-            except ValueError:
-                pass
-
-    elif service == "/esp32/set_config":
-        config = args.get("config", {})
-        await _broadcast(_esp32_clients, json.dumps({"op": "set_config", "config": config}))
-        await ws.send_str(json.dumps({
-            "op": "service_response",
-            "id": call_id,
-            "result": True,
-            "values": {},
-        }))
-
-    else:
-        log.warning("unknown service: %s", service)
-        await ws.send_str(json.dumps({
-            "op": "service_response",
-            "id": call_id,
-            "result": False,
-            "values": {"error": f"unknown service: {service}"},
-        }))
 
 
 async def _esp32_ws(request: web.Request) -> web.WebSocketResponse:
@@ -200,14 +182,13 @@ async def _on_esp32_message(text: str) -> None:
 
         if topic == "/wheel_vel":
             body = m.get("msg") or {}
-            odom = _odom.integrate(
+            r = _odom.integrate(
                 v_left  = body.get("left",  0.0),
                 v_right = body.get("right", 0.0),
                 dt      = body.get("dt",    0.0),
             )
-            if odom is not None:
-                await _broadcast(_ui_clients,
-                                 json.dumps({"op": "publish", "topic": "/odom", "msg": odom}))
+            if r is not None:
+                await _broadcast(_ui_clients, _odom_frame(r))
             return
 
         # その他の publish は canonical なトピック名で web に再配信
@@ -215,15 +196,10 @@ async def _on_esp32_message(text: str) -> None:
         return
 
     if op == "set_config" and m.get("config"):
-        config = m["config"]
-        _odom.update_config(config)
-        # get_config サービス呼び出しの待ちを解決
-        for fut in list(_config_waiters):
-            if not fut.done():
-                fut.set_result(config)
-        _config_waiters.clear()
-        # 他の UI クライアントにもブロードキャスト（他タブの同期用）
-        await _broadcast(_ui_clients, text)
+        # config は web ↔ esp32 の REST 直通で管理される。esp32 はここに
+        # 全 config スナップショットを push してくるので、brain は自身の
+        # オドメトリ積分（車輪ジオメトリ・共分散・frame 名）の同期にのみ使う。
+        _odom.update_config(m["config"])
         return
 
     await _broadcast(_ui_clients, text)

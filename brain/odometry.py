@@ -1,18 +1,27 @@
 """Differential-drive odometry for smabo-brain.
 
-Receives /wheel_vel messages relayed from smabo-esp32 and integrates
-them into a nav_msgs/Odometry pose.  Config parameters (wheel geometry,
-covariance, frame names) are kept in sync via update_config() whenever
-smabo-esp32 sends a set_config reply.
+Pure, transport-agnostic integrator: it knows nothing about WebSockets, ROS,
+time sources, or message formats.  ``integrate()`` returns plain pose/twist
+values so each transport can build its own message:
+
+  - smabo-brain (WebSocket)  → rosbridge JSON, wall-clock stamp (relay.py)
+  - smabo-brain-ros (rclpy)  → nav_msgs/Odometry + tf, ROS-clock stamp
+
+Keeping time/format out of here is what lets brain-ros wrap brain by simply
+importing this module.  Config parameters (wheel geometry, covariance, frame
+names) come from the ESP32 config snapshot via update_config().
 """
 
 import math
-import time
 
 _BIG = 1e6   # variance for unmeasured DoF (z, roll, pitch)
 
 
-def _build_pose_cov(cov_cfg: dict) -> list[float]:
+def build_pose_covariance(cov_cfg: dict) -> list[float]:
+    """Build the 36-element (6x6 row-major) pose covariance for nav_msgs/Odometry.
+
+    Pure value→value; shared by every transport that emits nav_msgs/Odometry.
+    """
     c = [0.0] * 36
     c[0]  = cov_cfg.get("pose_xx", 0.001)
     c[7]  = cov_cfg.get("pose_yy", 0.001)
@@ -23,7 +32,8 @@ def _build_pose_cov(cov_cfg: dict) -> list[float]:
     return c
 
 
-def _build_twist_cov(cov_cfg: dict) -> list[float]:
+def build_twist_covariance(cov_cfg: dict) -> list[float]:
+    """Build the 36-element (6x6 row-major) twist covariance for nav_msgs/Odometry."""
     c = [0.0] * 36
     c[0]  = cov_cfg.get("twist_vv", 0.001)
     c[7]  = _BIG
@@ -35,8 +45,12 @@ def _build_twist_cov(cov_cfg: dict) -> list[float]:
 
 
 class Odometry:
-    """Stateful integrator: call update_config() on config changes,
-    integrate() on each /wheel_vel message."""
+    """Stateful integrator returning raw pose/twist values (no message, no time).
+
+    Call update_config() on config changes and integrate() on each /wheel_vel
+    sample; the caller turns the returned values into whatever message its
+    transport needs.
+    """
 
     def __init__(self) -> None:
         self.x     = 0.0
@@ -45,7 +59,7 @@ class Odometry:
         self._esp32_cfg: dict = {}
 
     def update_config(self, esp32_cfg: dict) -> None:
-        """Sync wheel geometry and frame names from an ESP32 set_config payload."""
+        """Sync wheel geometry / covariance / frame names from an ESP32 config."""
         self._esp32_cfg = esp32_cfg
 
     def integrate(self, v_left: float, v_right: float, dt: float) -> dict | None:
@@ -60,8 +74,14 @@ class Odometry:
 
         Returns
         -------
-        dict
-            nav_msgs/Odometry message ready to publish, or None if dt ≤ 0.
+        dict or None
+            Raw pose/twist values plus covariance and frame names::
+
+                {"x", "y", "theta", "vx", "wz",
+                 "cov", "odom_frame", "base_frame"}
+
+            or None if dt <= 0.  Time-stamping and message building are left to
+            the transport layer (see relay.py for the WebSocket version).
         """
         if dt <= 0:
             return None
@@ -78,35 +98,14 @@ class Odometry:
         self.theta += d_theta
         self.theta  = math.atan2(math.sin(self.theta), math.cos(self.theta))
 
-        vx = d_center / dt
-        wz = d_theta  / dt
-
-        return self._build_msg(vx, wz)
-
-    def _build_msg(self, vx: float, wz: float) -> dict:
         enc = self._esp32_cfg.get("encoder") or {}
-        cov = enc.get("covariance") or {}
-        now = time.time()
-        qz  = math.sin(self.theta / 2.0)
-        qw  = math.cos(self.theta / 2.0)
         return {
-            "header": {
-                "stamp":    {"sec": int(now), "nanosec": int((now % 1) * 1e9)},
-                "frame_id": enc.get("odom_frame", "odom"),
-            },
-            "child_frame_id": enc.get("base_frame", "base_link"),
-            "pose": {
-                "pose": {
-                    "position":    {"x": self.x, "y": self.y, "z": 0.0},
-                    "orientation": {"x": 0.0, "y": 0.0, "z": qz, "w": qw},
-                },
-                "covariance": _build_pose_cov(cov),
-            },
-            "twist": {
-                "twist": {
-                    "linear":  {"x": vx,  "y": 0.0, "z": 0.0},
-                    "angular": {"x": 0.0, "y": 0.0, "z": wz},
-                },
-                "covariance": _build_twist_cov(cov),
-            },
+            "x":          self.x,
+            "y":          self.y,
+            "theta":      self.theta,
+            "vx":         d_center / dt,
+            "wz":         d_theta  / dt,
+            "cov":        enc.get("covariance") or {},
+            "odom_frame": enc.get("odom_frame", "odom"),
+            "base_frame": enc.get("base_frame", "base_link"),
         }
