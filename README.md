@@ -60,6 +60,20 @@ pip3 install -r requirements.txt
 python3 -m brain                 # --host / --port で変更可
 ```
 
+### 画像処理の起動時初期値
+
+`--vision-config <path.json>`（または環境変数 `SMABO_VISION_CONFIG`）で画像処理
+設定の初期値を渡せます。JSON は `/vision/config` の `data` と同形（部分指定可）。
+
+```bash
+python3 -m brain --vision-config vision.json
+# vision.json 例: {"enabled": true, "mode": "color", "color": "green",
+#                  "behaviors": {"look_at": true, "servo": false}}
+```
+
+未指定なら検出無効（`mode=off`）で起動し、実行中は `/vision/config` で部分上書き
+できます（現在値に deep-merge）。
+
 ## web UI
 
 操作用 web フロントエンド（`smabo-web`）は別リポジトリです。

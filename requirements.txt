@@ -1,1 +1,12 @@
 aiohttp>=3.9
+
+# Image processing (brain.vision). Headless OpenCV avoids GUI deps on SBC/PC.
+# Only needed when a vision mode is enabled; brain.vision imports cv2 lazily.
+numpy>=1.24
+opencv-contrib-python-headless>=4.7
+
+# WebRTC hub (brain.webrtc_hub): brain receives the smabo-app camera as a
+# WebRTC peer (low-latency, 30fps) and relays it to smabo-web preview clients.
+# aiortc pulls in PyAV (ffmpeg bindings) for video decode. Imported lazily so
+# the relay still starts without it (camera/vision simply stay disabled).
+aiortc>=1.6
