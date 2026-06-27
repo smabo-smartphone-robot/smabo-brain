@@ -8,6 +8,7 @@ from aiohttp import web
 
 from . import vision
 from .odometry import Odometry, build_pose_covariance, build_twist_covariance
+from .stt import SttEngine, wav_to_samples
 from .topics import APP_TOPICS as _APP_TOPICS, strip_prefix as _strip_prefix
 from .vision import VisionConfig, merge_config
 from .webrtc_hub import WebRtcHub
@@ -68,6 +69,49 @@ async def _hub_send_web(ws: web.WebSocketResponse, msg: dict) -> None:
 
 
 _hub: WebRtcHub | None = None
+
+# Speech-to-text engine. smabo-app sends a recorded utterance on /speech/audio;
+# the brain transcribes it and republishes the text on /speech/recognized.
+# Created in create_app from --stt-* options. None until then.
+_stt: SttEngine | None = None
+_warned_no_stt = False
+
+
+def _transcribe_b64_wav(b64: str) -> str:
+    """Decode a base64 WAV (16-bit PCM) and run STT. Returns '' on any failure.
+
+    Runs on a worker thread (STT is CPU-heavy). WAV parsing lives in brain.stt
+    so smabo-brain-ros reuses it.
+    """
+    import base64
+
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        return ""
+    samples, sr = wav_to_samples(raw)
+    if samples is None or samples.size == 0 or _stt is None:
+        return ""
+    return _stt.transcribe(samples, sr)
+
+
+async def _handle_speech_audio(body: dict) -> None:
+    """Receive a recorded utterance (/speech/audio) → STT → /speech/recognized."""
+    global _warned_no_stt
+    if _stt is None or not _stt.available:
+        if not _warned_no_stt:
+            _warned_no_stt = True
+            log.warning("/speech/audio を受信しましたが STT が無効です。"
+                        "vosk（または faster-whisper）を導入してください。")
+        return
+    b64 = (body or {}).get("data")
+    if not b64:
+        return
+    loop = asyncio.get_running_loop()
+    text = await loop.run_in_executor(None, _transcribe_b64_wav, b64)
+    if text:
+        log.info("STT: %r", text)
+        await _broadcast(_ui_clients, _pub("/speech/recognized", {"data": text}))
 
 
 def _stamp() -> dict:
@@ -317,6 +361,10 @@ async def _on_app_message(text: str) -> None:
                 if _hub is not None:
                     await _hub.add_app_ice(_frame_data_json(frame))
                 return
+            # 録音音声（app → brain）。brain が STT して /speech/recognized を配信。
+            if stripped == "/speech/audio":
+                asyncio.create_task(_handle_speech_audio(frame.get("msg") or {}))
+                return
             if stripped != topic:
                 frame["topic"] = stripped
                 forwarded = text.replace(json.dumps(topic), json.dumps(stripped), 1)
@@ -457,14 +505,18 @@ async def _on_esp32_message(text: str) -> None:
     await _broadcast(_ui_clients, text)
 
 
-def create_app(vision_config: dict | None = None) -> web.Application:
+def create_app(vision_config: dict | None = None,
+               stt_config: dict | None = None) -> web.Application:
     """リレーサーバの aiohttp アプリを構築する。
 
     vision_config: 画像処理設定の起動時初期値（VisionConfig.to_dict() 形状の
     dict）。--vision-config / SMABO_VISION_CONFIG から読んだものを渡す。None の
     場合は VisionConfig の組み込み既定（mode=off, 検出無効）で起動する。
+
+    stt_config: 音声認識の設定（engine / model / language）。None の場合は
+    既定（vosk / 日本語）で起動する。
     """
-    global _vision, _hub
+    global _vision, _hub, _stt
     if vision_config is not None:
         _vision = VisionConfig(vision_config)
 
@@ -478,6 +530,9 @@ def create_app(vision_config: dict | None = None) -> web.Application:
     if not _hub.available:
         log.warning("aiortc が無いため WebRTC カメラ/vision は無効です。"
                     "pip install -r requirements.txt を実行してください。")
+
+    # 音声認識エンジン（/speech/audio → /speech/recognized）。
+    _stt = SttEngine(**(stt_config or {}))
 
     app = web.Application()
     app.router.add_get("/",      _app_ws)

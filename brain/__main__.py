@@ -45,9 +45,32 @@ def main() -> None:
         help="画像処理設定の起動時初期値 JSON（/vision/config の data と同形）。"
              "環境変数 SMABO_VISION_CONFIG でも指定可。",
     )
+    parser.add_argument(
+        "--stt-engine",
+        default=os.environ.get("SMABO_STT_ENGINE", "vosk"),
+        choices=["vosk", "whisper"],
+        help="音声認識エンジン（既定: vosk）。whisper は faster-whisper を使用。",
+    )
+    parser.add_argument(
+        "--stt-model",
+        default=os.environ.get("SMABO_STT_MODEL", ""),
+        metavar="PATH_OR_SIZE",
+        help="vosk はモデルディレクトリのパス（空なら言語から小モデルを自動取得）。"
+             "whisper はサイズ名（例: small）。環境変数 SMABO_STT_MODEL でも指定可。",
+    )
+    parser.add_argument(
+        "--stt-language",
+        default=os.environ.get("SMABO_STT_LANGUAGE", "ja"),
+        help="音声認識の言語（既定: ja）。",
+    )
     args = parser.parse_args()
 
     vision_config = _load_vision_config(args.vision_config)
+    stt_config = {
+        "engine": args.stt_engine,
+        "model": args.stt_model,
+        "language": args.stt_language,
+    }
 
     print("smabo-brain relay server")
     print(f"  smabo-app WS  : ws://<this-host>:{args.port}/")
@@ -55,8 +78,9 @@ def main() -> None:
     print(f"  smabo-esp32 WS: ws://<this-host>:{args.port}/esp32")
     if vision_config is not None:
         print(f"  vision config : {args.vision_config} (loaded)")
+    print(f"  STT engine    : {args.stt_engine} (language={args.stt_language})")
 
-    app = create_app(vision_config=vision_config)
+    app = create_app(vision_config=vision_config, stt_config=stt_config)
     web.run_app(app, host=args.host, port=args.port, print=None)
 
 

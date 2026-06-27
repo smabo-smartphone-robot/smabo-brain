@@ -10,3 +10,12 @@ opencv-contrib-python-headless>=4.7
 # aiortc pulls in PyAV (ffmpeg bindings) for video decode. Imported lazily so
 # the relay still starts without it (camera/vision simply stay disabled).
 aiortc>=1.6
+
+# Speech-to-text (brain.stt): smabo-app sends a recorded utterance on
+# /speech/audio and the brain transcribes it to /speech/recognized. Default
+# engine is vosk (lightweight, offline). faster-whisper is an optional, more
+# accurate alternative — install it only when --stt-engine whisper is used:
+#     pip install faster-whisper
+# Both are imported lazily, so the relay still starts without them.
+# (Some platforms only ship wheels up to 0.3.44 — pin accordingly.)
+vosk>=0.3.42

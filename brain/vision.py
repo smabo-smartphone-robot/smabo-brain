@@ -111,7 +111,7 @@ class VisionConfig:
         # Frame capture rate (fps) the web client sends to the brain for
         # detection. Higher = more responsive look_at/servo/drive (useful for a
         # mobile robot) at the cost of bandwidth + CPU. Clamped to a sane range.
-        self.capture_fps = float(raw.get("capture_fps", 5.0))
+        self.capture_fps = float(raw.get("capture_fps", 30.0))
         if self.capture_fps < 1.0:
             self.capture_fps = 1.0
         elif self.capture_fps > 30.0:
