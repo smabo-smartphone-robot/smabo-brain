@@ -10,6 +10,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# mDNS ホスト名チェック
+if [ "$(hostname)" != "smabo-brain" ]; then
+  echo "[run.sh] 警告: ホスト名が 'smabo-brain' ではありません（現在: $(hostname)）"
+  echo "[run.sh]   smabo-brain.local で接続するには ./setup.sh を先に実行してください"
+fi
+
 VENV="${SMABO_BRAIN_VENV:-.venv}"
 PYTHON="${PYTHON:-python3}"
 

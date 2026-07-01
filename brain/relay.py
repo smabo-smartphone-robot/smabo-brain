@@ -303,11 +303,16 @@ async def _broadcast(targets: set[web.WebSocketResponse], text: str) -> None:
     targets -= dead
 
 
+def _notice(source: str, event: str, total: int) -> str:
+    return json.dumps({"op": "notice", "source": source, "event": event, "total": total})
+
+
 async def _app_ws(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     _app_clients.add(ws)
     log.info("app connected (total=%d)", len(_app_clients))
+    await _broadcast(_ui_clients, _notice("app", "connected", len(_app_clients)))
     try:
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
@@ -320,6 +325,7 @@ async def _app_ws(request: web.Request) -> web.WebSocketResponse:
             # 映像源（app）が切れたら WebRTC ピアと中継を畳む。
             await _hub.close_app()
         log.info("app disconnected (total=%d)", len(_app_clients))
+        await _broadcast(_ui_clients, _notice("app", "disconnected", len(_app_clients)))
     return ws
 
 
@@ -387,6 +393,11 @@ async def _ui_ws(request: web.Request) -> web.WebSocketResponse:
     # 既定では映像を流さない）。
     try:
         await ws.send_str(_vision_config_frame())
+        # 接続済みクライアントの現在状態をスナップショットとして送る
+        if _app_clients:
+            await ws.send_str(_notice("app", "connected", len(_app_clients)))
+        if _esp32_clients:
+            await ws.send_str(_notice("esp32", "connected", len(_esp32_clients)))
     except Exception:
         pass
     try:
@@ -448,10 +459,14 @@ async def _ui_ws(request: web.Request) -> web.WebSocketResponse:
 
 
 async def _esp32_ws(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse()
+    # heartbeat: send a WS ping every 5 s; close if no pong within 5 s.
+    # Detects a powered-off ESP32 within ~10 s (worst case: just missed a ping).
+    # The ESP32 ws_client.py handles opcode 0x9 (ping) and replies with 0xA (pong).
+    ws = web.WebSocketResponse(heartbeat=5)
     await ws.prepare(request)
     _esp32_clients.add(ws)
     log.info("ESP32 connected (total=%d)", len(_esp32_clients))
+    await _broadcast(_ui_clients, _notice("esp32", "connected", len(_esp32_clients)))
     try:
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
@@ -461,6 +476,7 @@ async def _esp32_ws(request: web.Request) -> web.WebSocketResponse:
     finally:
         _esp32_clients.discard(ws)
         log.info("ESP32 disconnected (total=%d)", len(_esp32_clients))
+        await _broadcast(_ui_clients, _notice("esp32", "disconnected", len(_esp32_clients)))
     return ws
 
 
