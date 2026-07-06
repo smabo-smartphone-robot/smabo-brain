@@ -40,9 +40,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=9090)
     parser.add_argument(
         "--vision-config",
-        default=os.environ.get("SMABO_VISION_CONFIG"),
+        default=os.environ.get("SMABO_VISION_CONFIG", "vision_config.json"),
         metavar="PATH",
-        help="画像処理設定の起動時初期値 JSON（/vision/config の data と同形）。"
+        help="画像処理設定の JSON ファイルパス（既定: vision_config.json）。"
+             "起動時に読み込み、変更のたびに自動保存される。"
              "環境変数 SMABO_VISION_CONFIG でも指定可。",
     )
     parser.add_argument(
@@ -66,6 +67,7 @@ def main() -> None:
     args = parser.parse_args()
 
     vision_config = _load_vision_config(args.vision_config)
+    vision_config_path = args.vision_config
     stt_config = {
         "engine": args.stt_engine,
         "model": args.stt_model,
@@ -77,10 +79,12 @@ def main() -> None:
     print(f"  smabo-web WS  : ws://<this-host>:{args.port}/ui")
     print(f"  smabo-esp32 WS: ws://<this-host>:{args.port}/esp32")
     if vision_config is not None:
-        print(f"  vision config : {args.vision_config} (loaded)")
+        print(f"  vision config : {vision_config_path} (loaded)")
+    else:
+        print(f"  vision config : {vision_config_path} (not found, using defaults; will be created on first change)")
     print(f"  STT engine    : {args.stt_engine} (language={args.stt_language})")
 
-    app = create_app(vision_config=vision_config, stt_config=stt_config)
+    app = create_app(vision_config=vision_config, vision_config_path=vision_config_path, stt_config=stt_config)
     web.run_app(app, host=args.host, port=args.port, print=None)
 
 

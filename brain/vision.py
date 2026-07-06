@@ -130,7 +130,12 @@ class VisionConfig:
         self.tilt_joint = tj.get("tilt", "")
         self.pan_sign = float(tj.get("pan_sign", 1.0))
         self.tilt_sign = float(tj.get("tilt_sign", 1.0))
-        self.servo_gain = float(tj.get("gain", 1.0))
+        self.servo_kp = float(tj.get("kp", tj.get("gain", 0.5)))
+        self.servo_ki = float(tj.get("ki", 0.0))
+        self.servo_kd = float(tj.get("kd", 0.03))
+        # Frames of consecutive detection loss to tolerate before resetting PID
+        # (prevents integral windup reset on brief dropouts). 0 = reset immediately.
+        self.servo_lost_tolerance = int(tj.get("lost_tolerance", 0))
         # Which behaviors a detection drives (each independently toggled by web).
         bh = raw.get("behaviors") or {}
         self.do_look_at = bool(bh.get("look_at", True))
@@ -139,11 +144,17 @@ class VisionConfig:
         # Drive (mobile-robot follow) tuning.
         dr = raw.get("drive") or {}
         self.drive_target_frac = float(dr.get("target_area_frac", 0.10))
-        self.drive_k_ang = float(dr.get("k_ang", 1.5))
-        self.drive_k_lin = float(dr.get("k_lin", 2.0))
+        # k_ang / k_lin kept for backward compat; kp_* takes precedence.
+        self.drive_kp_ang = float(dr.get("kp_ang", dr.get("k_ang", 1.5)))
+        self.drive_ki_ang = float(dr.get("ki_ang", 0.0))
+        self.drive_kd_ang = float(dr.get("kd_ang", 0.15))
+        self.drive_kp_lin = float(dr.get("kp_lin", dr.get("k_lin", 2.0)))
+        self.drive_ki_lin = float(dr.get("ki_lin", 0.0))
+        self.drive_kd_lin = float(dr.get("kd_lin", 0.0))
         self.drive_max_ang = float(dr.get("max_ang", 1.0))
         self.drive_max_lin = float(dr.get("max_lin", 0.20))
         self.drive_deadzone = float(dr.get("deadzone", 0.02))
+        self.drive_lost_tolerance = int(dr.get("lost_tolerance", 0))
 
     def to_dict(self) -> dict:
         return {
@@ -157,16 +168,19 @@ class VisionConfig:
             "target_joints": {
                 "pan": self.pan_joint, "tilt": self.tilt_joint,
                 "pan_sign": self.pan_sign, "tilt_sign": self.tilt_sign,
-                "gain": self.servo_gain,
+                "kp": self.servo_kp, "ki": self.servo_ki, "kd": self.servo_kd,
+                "lost_tolerance": self.servo_lost_tolerance,
             },
             "behaviors": {
                 "look_at": self.do_look_at, "servo": self.do_servo, "drive": self.do_drive,
             },
             "drive": {
                 "target_area_frac": self.drive_target_frac,
-                "k_ang": self.drive_k_ang, "k_lin": self.drive_k_lin,
+                "kp_ang": self.drive_kp_ang, "ki_ang": self.drive_ki_ang, "kd_ang": self.drive_kd_ang,
+                "kp_lin": self.drive_kp_lin, "ki_lin": self.drive_ki_lin, "kd_lin": self.drive_kd_lin,
                 "max_ang": self.drive_max_ang, "max_lin": self.drive_max_lin,
                 "deadzone": self.drive_deadzone,
+                "lost_tolerance": self.drive_lost_tolerance,
             },
         }
 
@@ -506,6 +520,34 @@ def detections_from_detection2darray(msg: dict):
 # Policy: pick a target, project to a direction, drive look_at / servo
 # ---------------------------------------------------------------------------
 
+class PIDState:
+    """Single-axis PID state for servo tracking.
+
+    Tracks integral accumulation and previous error across frames.
+    Call reset() when the target is lost to avoid integral windup on re-acquisition.
+    """
+
+    def __init__(self):
+        self.integral = 0.0
+        self.prev_error: float | None = None
+        self.prev_t: float | None = None
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_error = None
+        self.prev_t = None
+
+    def compute(self, error: float, kp: float, ki: float, kd: float, t: float) -> float:
+        dt = (t - self.prev_t) if self.prev_t is not None else 0.0
+        if 0.0 < dt < 1.0:
+            self.integral += error * dt
+        deriv = ((error - self.prev_error) / dt
+                 if (self.prev_error is not None and dt > 0.0) else 0.0)
+        self.prev_error = error
+        self.prev_t = t
+        return kp * error + ki * self.integral + kd * deriv
+
+
 def pick_target(detections, target_marker_id=None):
     """Pick the detection to act on: a preferred id if present, else largest area."""
     if not detections:
@@ -549,23 +591,37 @@ def direction_to_look_at(direction, frame_id, stamp):
     }
 
 
-def direction_to_servo(direction, cfg: VisionConfig, stamp, joints_available=None):
+def direction_to_servo(direction, cfg: VisionConfig, stamp, joints_available=None,
+                       joint_angles=None, pan_pid: PIDState | None = None,
+                       tilt_pid: PIDState | None = None):
     """Build a ``trajectory_msgs/JointTrajectory`` aiming the neck at ``direction``.
 
-    Only emits joints listed in ``cfg`` that also exist in ``joints_available``
-    (when provided), so the policy adapts to the robot's actual servos.
+    Uses a PID controller so the servo accumulates toward the target rather than
+    snapping to a fixed fraction of the full angle.  ``joint_angles`` (rad) provides
+    the current servo position; ``pan_pid`` / ``tilt_pid`` carry integral/derivative
+    state across frames.
     """
+    import time as _time
+    t = _time.monotonic()
     x, y, z = direction
-    pan = cfg.pan_sign * math.atan2(y, x) * cfg.servo_gain
-    tilt = cfg.tilt_sign * math.atan2(z, math.hypot(x, y)) * cfg.servo_gain
+    pan_error = cfg.pan_sign * math.atan2(y, x)
+    tilt_error = cfg.tilt_sign * math.atan2(z, math.hypot(x, y))
     names, positions = [], []
-    for joint, value in ((cfg.pan_joint, pan), (cfg.tilt_joint, tilt)):
+    for joint, error, pid in (
+        (cfg.pan_joint,  pan_error,  pan_pid),
+        (cfg.tilt_joint, tilt_error, tilt_pid),
+    ):
         if not joint:
             continue
         if joints_available is not None and joint not in joints_available:
             continue
+        current = (joint_angles or {}).get(joint, 0.0)
+        if pid is not None:
+            output = pid.compute(error, cfg.servo_kp, cfg.servo_ki, cfg.servo_kd, t)
+        else:
+            output = cfg.servo_kp * error
         names.append(joint)
-        positions.append(value)
+        positions.append(current + output)
     if not names:
         return None
     return {
@@ -573,7 +629,7 @@ def direction_to_servo(direction, cfg: VisionConfig, stamp, joints_available=Non
         "joint_names": names,
         "points": [{
             "positions": positions, "velocities": [],
-            "time_from_start": {"sec": 0, "nanosec": 200_000_000},
+            "time_from_start": {"sec": 0, "nanosec": 0},
         }],
     }
 
@@ -582,30 +638,60 @@ _STOP_TWIST = {"linear": {"x": 0.0, "y": 0.0, "z": 0.0},
                "angular": {"x": 0.0, "y": 0.0, "z": 0.0}}
 
 
-def to_cmd_vel(target, img_wh, cfg: VisionConfig):
+def to_cmd_vel(target, img_wh, cfg: VisionConfig,
+               ang_pid: "PIDState | None" = None,
+               lin_pid: "PIDState | None" = None):
     """Make the mobile robot follow ``target`` → ``geometry_msgs/Twist`` dict.
 
     Turns to keep the target centered (``angular.z``) and approaches/recedes to
-    hold a target apparent size (``linear.x``, from the bbox area fraction as a
-    distance proxy).  Returns a stop twist when there is no target.
+    hold a target apparent size (``linear.x``).
+
+    The linear error uses sqrt(area_frac) rather than area_frac directly.
+    Area fraction ∝ 1/d², so using it raw makes "too close" errors 4× larger
+    than "too far" errors at the same physical displacement, causing asymmetric
+    backward speed.  sqrt(area_frac) ∝ 1/d improves symmetry.
+
+    Note: kp_lin acts on sqrt-area units.  If migrating from an area-based
+    config, divide kp_lin by sqrt(target_area_frac) / old_max_error.
+
+    ``ang_pid`` / ``lin_pid`` carry PID state across frames.  When provided, a
+    full PID controller (P + I + D) is used; otherwise falls back to P-only.
     """
+    import time as _time
     if target is None or not img_wh:
         return dict(_STOP_TWIST)
     w, h = img_wh
     if w <= 0 or h <= 0:
         return dict(_STOP_TWIST)
-    u_n = (target["cx"] - w / 2.0) / (w / 2.0)            # +right
+    import math as _math
+    t = _time.monotonic()
+    u_n = (target["cx"] - w / 2.0) / (w / 2.0)            # +right, range ~[-1, 1]
     area_frac = (target["w"] * target["h"]) / float(w * h)
 
-    ang = max(-cfg.drive_max_ang, min(cfg.drive_max_ang, -cfg.drive_k_ang * u_n))
+    ang_err = -u_n                                          # positive = turn left
+    if ang_pid is not None:
+        ang_raw = ang_pid.compute(ang_err, cfg.drive_kp_ang, cfg.drive_ki_ang, cfg.drive_kd_ang, t)
+    else:
+        ang_raw = cfg.drive_kp_ang * ang_err
+    ang = max(-cfg.drive_max_ang, min(cfg.drive_max_ang, ang_raw))
 
-    err = cfg.drive_target_frac - area_frac              # >0: too far → forward
-    lin = cfg.drive_k_lin * err
-    if abs(u_n) > 0.5:                                    # don't drive in until facing
-        lin = min(lin, 0.0)
-    if abs(err) < cfg.drive_deadzone:
+    # area_frac ∝ 1/d² なのでそのままでは近づきすぎ時のエラーが遠すぎ時の4倍になり
+    # 後退速度が極端に速くなる。sqrt で 1/d に線形化して対称性を改善する。
+    size_frac        = _math.sqrt(max(area_frac, 0.0))
+    target_size_frac = _math.sqrt(max(cfg.drive_target_frac, 0.0))
+    lin_err = target_size_frac - size_frac                  # >0: too far → forward
+    if abs(lin_err) < cfg.drive_deadzone:
         lin = 0.0
-    lin = max(-cfg.drive_max_lin, min(cfg.drive_max_lin, lin))
+        if lin_pid is not None:
+            lin_pid.integral = 0.0                          # prevent windup at deadzone
+    else:
+        if lin_pid is not None:
+            lin_raw = lin_pid.compute(lin_err, cfg.drive_kp_lin, cfg.drive_ki_lin, cfg.drive_kd_lin, t)
+        else:
+            lin_raw = cfg.drive_kp_lin * lin_err
+        if abs(u_n) > 0.5:                                  # don't approach until roughly facing target
+            lin_raw = min(lin_raw, 0.0)
+        lin = max(-cfg.drive_max_lin, min(cfg.drive_max_lin, lin_raw))
 
     return {"linear": {"x": lin, "y": 0.0, "z": 0.0},
             "angular": {"x": 0.0, "y": 0.0, "z": ang}}

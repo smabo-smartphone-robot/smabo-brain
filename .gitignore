@@ -54,3 +54,4 @@ secrets.py
 .DS_Store
 .AppleDouble
 .LSOverride
+vision_config.json

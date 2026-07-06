@@ -42,9 +42,17 @@ def _vision_config_frame() -> str:
 # 画像処理パイプライン用の状態。CV は重いので executor で実行し、処理中は後続
 # フレームを間引く（busy フラグ）。インターバルは設けず、処理が終わり次第
 # 次フレームを受け付ける（実効 fps = 1 / 検出時間 で自然に決まる）。
+_vision_config_path: str | None = None   # vision_config.json の保存先パス
+_pan_pid       = vision.PIDState()       # pan 軸 PID 状態
+_tilt_pid      = vision.PIDState()       # tilt 軸 PID 状態
+_drive_ang_pid = vision.PIDState()       # drive follow: 角速度 PID 状態
+_drive_lin_pid = vision.PIDState()       # drive follow: 直進速度 PID 状態
+_servo_lost_count = 0                    # gaze/servo: ターゲット連続ロストフレーム数
+_drive_lost_count = 0                    # drive: ターゲット連続ロストフレーム数
 _vision_busy = False
 _vision_last_spoken: str | None = None   # 発話の重複抑制（brain 側 dedup）
 _esp32_joints: set[str] = set()          # set_config で得た実在関節名（servo policy 用）
+_esp32_joint_angles: dict[str, float] = {}  # /joint_states から取得した現在角度（rad）
 _warned_no_cv2 = False                    # OpenCV 未導入の警告は一度だけ出す
 _vision_last_count = -1                   # 検出件数の変化時だけログを出す（診断用）
 
@@ -130,7 +138,9 @@ def _update_esp32_joints(config: dict) -> None:
         pass
 
 
-def _run_vision_sync(bgr, cfg: VisionConfig, joints_available) -> dict | None:
+def _run_vision_sync(bgr, cfg: VisionConfig, joints_available, joint_angles=None,
+                     pan_pid=None, tilt_pid=None,
+                     drive_ang_pid=None, drive_lin_pid=None) -> dict | None:
     """CV ＋ policy（純ロジック）をワーカースレッドで実行し、送信用フレームを返す。
 
     bgr は BGR の ndarray（WebRTC ハブが取り出したフレーム）。run_detector は
@@ -161,14 +171,16 @@ def _run_vision_sync(bgr, cfg: VisionConfig, joints_available) -> dict | None:
         if cfg.do_look_at:
             look_at = vision.direction_to_look_at(direction, "base_link", stamp)
         if cfg.do_servo:
-            servo = vision.direction_to_servo(direction, cfg, stamp, joints_available)
+            servo = vision.direction_to_servo(
+                direction, cfg, stamp, joints_available, joint_angles, pan_pid, tilt_pid)
     if cfg.do_drive:
         # ターゲット無しでも停止 twist を出して暴走を防ぐ
-        cmd_vel = vision.to_cmd_vel(target, img_wh, cfg)
+        cmd_vel = vision.to_cmd_vel(target, img_wh, cfg, drive_ang_pid, drive_lin_pid)
     return {
         "img_wh": img_wh,
         "detections": det_msg, "strings": strings,
         "look_at": look_at, "servo": servo, "cmd_vel": cmd_vel,
+        "target_found": target is not None,
     }
 
 
@@ -182,6 +194,7 @@ async def process_vision_frame(bgr) -> None:
     """
     global _vision_busy, _vision_last_spoken
     global _warned_no_cv2, _vision_last_count
+    global _servo_lost_count, _drive_lost_count
     cfg = _vision
     if not cfg.enabled or cfg.mode == "off":
         return
@@ -197,7 +210,8 @@ async def process_vision_frame(bgr) -> None:
     try:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            None, _run_vision_sync, bgr, cfg, _esp32_joints or None)
+            None, _run_vision_sync, bgr, cfg, _esp32_joints or None, dict(_esp32_joint_angles),
+            _pan_pid, _tilt_pid, _drive_ang_pid, _drive_lin_pid)
     except Exception:
         log.exception("vision processing failed")
         result = None
@@ -205,6 +219,22 @@ async def process_vision_frame(bgr) -> None:
         _vision_busy = False
     if not result:
         return
+
+    # ── tolerance 付きロスト処理（PID リセット判定） ───────────────────────────
+    # target_found が False のフレームが tolerance を超えて連続したときにのみ
+    # PID をリセットする。これにより短時間のドロップアウトで積分が失われない。
+    if result["target_found"]:
+        _servo_lost_count = 0
+        _drive_lost_count = 0
+    else:
+        _servo_lost_count += 1
+        _drive_lost_count += 1
+        if _servo_lost_count > cfg.servo_lost_tolerance:
+            _pan_pid.reset()
+            _tilt_pid.reset()
+        if _drive_lost_count > cfg.drive_lost_tolerance:
+            _drive_ang_pid.reset()
+            _drive_lin_pid.reset()
 
     # 検出件数が変わったときだけ、解像度つきでログ。
     #   ・"vision[aruco] 640x480: 0 detection(s)" が出続ける → 検出は走るが0件
@@ -291,6 +321,12 @@ def _apply_vision_config(body: dict) -> None:
     if not isinstance(patch, dict):
         return
     _vision = VisionConfig(merge_config(_vision.to_dict(), patch))
+    if _vision_config_path:
+        try:
+            with open(_vision_config_path, "w", encoding="utf-8") as f:
+                json.dump(_vision.to_dict(), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log.warning("vision config の保存に失敗しました (%s)", e)
 
 
 async def _broadcast(targets: set[web.WebSocketResponse], text: str) -> None:
@@ -493,6 +529,16 @@ async def _on_esp32_message(text: str) -> None:
         topic = _strip_prefix(m.get("topic", ""), "/esp32")
         m["topic"] = topic
 
+        if topic == "/joint_states":
+            global _esp32_joint_angles
+            body = m.get("msg") or {}
+            names = body.get("name") or []
+            positions = body.get("position") or []
+            _esp32_joint_angles = {n: p for n, p in zip(names, positions)}
+            # joint_states は UI にも転送する
+            await _broadcast(_ui_clients, json.dumps(m))
+            return
+
         if topic == "/wheel_vel":
             body = m.get("msg") or {}
             r = _odom.integrate(
@@ -522,6 +568,7 @@ async def _on_esp32_message(text: str) -> None:
 
 
 def create_app(vision_config: dict | None = None,
+               vision_config_path: str | None = None,
                stt_config: dict | None = None) -> web.Application:
     """リレーサーバの aiohttp アプリを構築する。
 
@@ -532,7 +579,8 @@ def create_app(vision_config: dict | None = None,
     stt_config: 音声認識の設定（engine / model / language）。None の場合は
     既定（vosk / 日本語）で起動する。
     """
-    global _vision, _hub, _stt
+    global _vision, _hub, _stt, _vision_config_path
+    _vision_config_path = vision_config_path
     if vision_config is not None:
         _vision = VisionConfig(vision_config)
 
