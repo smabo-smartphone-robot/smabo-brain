@@ -86,7 +86,7 @@ class Odometry:
         if dt <= 0:
             return None
 
-        sep = (self._esp32_cfg.get("dc") or {}).get("wheel_separation", 0.15)
+        sep = (self._esp32_cfg.get("dc") or {}).get("wheel_separation", 0.13)
 
         d_l = v_left  * dt
         d_r = v_right * dt
