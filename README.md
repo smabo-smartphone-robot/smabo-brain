@@ -14,13 +14,23 @@ smabo-app  ──►  smabo-brain  ◄──  smabo-web
 
 ## エンドポイント
 
-サーバはデフォルト `0.0.0.0:9090` で待ち受け、接続元ごとにパスを分けます。
+サーバはデフォルト `0.0.0.0:9090` で待ち受けます。接続口は `ws://<host>:9090/` の1つだけで、
+smabo-brain-ros（rosbridge）と同じ手順でつなぎます。クライアントは brain がどちらでも
+設定を変えずに動きます。
 
-| パス | 接続元 | 役割 |
-|------|--------|------|
-| `/` | smabo-app | センサデータ（IMU/GPS）・録音音声（`/speech/audio`）・WebRTC シグナリングを送信、`/look_at`・`/speech/say`・`/expression` を受信 |
-| `/ui` | smabo-web | 制御指令送信 → esp32 / app へ中継、フィードバック受信 |
-| `/esp32` | smabo-esp32 | 制御指令受信、`/wheel_vel`・`/joint_states` 等を送信 |
+1. `/` に接続する
+2. publish するトピックを `advertise`、受け取るトピックを `subscribe` する
+3. 送信元 prefix（下記）を付けて `publish` する
+
+brain は最初に届いたフレーム（prefix 付きの advertise / publish、または特定の
+クライアントだけが受け取るトピックの subscribe）から、相手が web / app / esp32 の
+どれかを判別します。誰が何を送受信するかの表は `brain/topics.py` にあります。
+
+| 接続元 | おもな送信 | おもな受信 |
+|--------|-----------|-----------|
+| smabo-app | IMU/GPS、録音音声（`/speech/audio`）、WebRTC シグナリング | `/look_at`・`/speech/say`・`/expression` |
+| smabo-web | 制御指令（esp32 / app へ中継） | `/odom`・センサ・画像処理の結果 |
+| smabo-esp32 | `/wheel_vel`・`/joint_states`・`/scan`・`/config` | `/cmd_vel`・`/servo/command` |
 
 カメラ映像は WebSocket ではなく WebRTC で smabo-app から brain に届きます
 （シグナリングのみ WebSocket。`brain/webrtc_hub.py`）。
@@ -29,8 +39,8 @@ smabo-app  ──►  smabo-brain  ◄──  smabo-web
 
 設定（config / mode）は brain を経由しません。smabo-web は ESP32 の REST API
 （`http://<esp32>/config`・`/mode`）へ直接アクセスします。brain はオドメトリ積分に
-必要な車輪ジオメトリ等のため、ESP32 が WebSocket で push してくる config スナップショット
-（`set_config`）を内部の同期にのみ使います。
+必要な車輪ジオメトリ等のため、ESP32 が `/esp32/config`（std_msgs/String の data に JSON、
+Wi-Fi 設定は除く）で送ってくる config スナップショットを内部の同期にのみ使います。
 
 ## 送信元 prefix
 
@@ -39,15 +49,14 @@ smabo-app  ──►  smabo-brain  ◄──  smabo-web
 brain はこの prefix を**剥がしてから** canonical なトピック名で宛先へ再配信します
 （例: esp32 が送る `/esp32/wheel_vel` → 積分後 `/odom`、web が送る `/web/cmd_vel` → `/cmd_vel`）。
 受信側は常に prefix 無しの canonical 名で受け取ります。
-`set_config` / `get_config` / `call_service` など publish 以外の op には prefix は付きません。
-将来 ROS 化する際は、この剥離箇所を twist_mux や topic remap に置き換えることで自然に移行できます。
+smabo-brain-ros では、同じ表（`brain/topics.py`）から topic_tools relay を作って prefix を剥がします。
 
 ## 処理
 
 - **オドメトリ積分**: smabo-esp32 が送る `/wheel_vel`（left/right m/s, dt）を受信し、
   `brain/odometry.py` で x/y/θ を積分して nav_msgs/Odometry 形式の `/odom` を web へ送出します。
-  ホイール径などのパラメータは、esp32 が接続時・設定変更時に push する config スナップショット
-  （`set_config`）から自動同期します（config 自体の読み書きは web ↔ esp32 の REST 直通）。
+  ホイール径などのパラメータは、esp32 が接続時・設定変更時に送る config スナップショット
+  （`/esp32/config`）から自動同期します（config 自体の読み書きは web ↔ esp32 の REST 直通）。
   （将来 IMU/GPS とのフュージョンをここに追加できます）
 - **画像処理**: WebRTC で受けたカメラ映像から検出（aruco / color / face / qr、`brain/vision.py`）し、
   `/vision/detections`・`/vision/markers` を web へ送出。`/vision/config` の `behaviors` に応じて
@@ -87,4 +96,18 @@ python3 -m brain --vision-config vision.json
 ## web UI
 
 操作用 web フロントエンド（`smabo-web`）は別リポジトリです。
-ブラウザから `ws://<brain-host>:9090/ui` に接続して使用します。
+ブラウザから `ws://<brain-host>:9090/` に接続して使用します。
+
+## ファイル構成
+
+| ファイル | 内容 |
+|----------|------|
+| `brain/__main__.py` | 起動オプション |
+| `brain/server.py` | WebSocket の受信と振り分け |
+| `brain/clients.py` | 接続中のクライアントと、その種類の判別 |
+| `brain/frames.py` | rosbridge JSON の組み立て（publish・`/odom`・接続通知） |
+| `brain/vision_pipeline.py` | 画像処理の実行と状態（設定・PID） |
+| `brain/speech.py` | 録音の受け付けと音声認識 |
+| `brain/topics.py`・`odometry.py`・`vision.py`・`stt.py`・`webrtc_hub.py` | 共通ロジック。smabo-brain-ros も import する |
+
+テスト: `python -m pytest tests`

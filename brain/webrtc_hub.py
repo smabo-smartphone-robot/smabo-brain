@@ -12,7 +12,7 @@ web client. The Vision tab draws detection rectangles itself as an HTML overlay
 from ``/vision/detections``; the relayed video is therefore the raw pass-through
 (no server-side re-encode).
 
-Signaling rides the existing brain WebSocket relay (see relay.py):
+Signaling rides the brain WebSocket (see server.py):
 
     app → brain : /webrtc/offer        brain → app : /webrtc/answer
     app → brain : /webrtc/app_ice      (brain ICE is bundled in the answer SDP)

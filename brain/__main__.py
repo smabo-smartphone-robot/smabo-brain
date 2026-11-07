@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from aiohttp import web
-from .relay import create_app
+from .server import create_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,7 +35,7 @@ def _load_vision_config(path: str | None) -> dict | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="smabo-brain relay server")
+    parser = argparse.ArgumentParser(description="smabo-brain")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9090)
     parser.add_argument(
@@ -74,9 +74,8 @@ def main() -> None:
         "language": args.stt_language,
     }
 
-    print("smabo-brain relay server")
-    print(f"  WebSocket     : ws://<this-host>:{args.port}/  (rosbridge-compatible; app / web / esp32 / sim)")
-    print(f"  also          : /ui (web), /esp32 (ESP32) for clients that pick the path")
+    print("smabo-brain")
+    print(f"  WebSocket     : ws://<this-host>:{args.port}/  (app / web / esp32 / sim, rosbridge-style)")
     if vision_config is not None:
         print(f"  vision config : {vision_config_path} (loaded)")
     else:
