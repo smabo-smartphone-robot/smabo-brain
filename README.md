@@ -3,7 +3,8 @@
 smabo システムの中継・処理サーバ（Python / aiohttp）。
 
 全コンポーネントが WebSocket クライアントとして接続してくる唯一のサーバで、
-センサデータの中継と、マイコンではできない処理（オドメトリ積分など）を担います。
+センサデータの中継と、マイコンではできない処理（オドメトリ積分・画像処理・音声認識・
+カメラ映像の WebRTC 終端）を担います。
 
 ```
 smabo-app  ──►  smabo-brain  ◄──  smabo-web
@@ -17,9 +18,12 @@ smabo-app  ──►  smabo-brain  ◄──  smabo-web
 
 | パス | 接続元 | 役割 |
 |------|--------|------|
-| `/` | smabo-app | センサデータ（IMU/GPS/カメラ）送信 → web へ中継 |
-| `/ui` | smabo-web | 制御指令送信 → esp32 へ中継、フィードバック受信 |
+| `/` | smabo-app | センサデータ（IMU/GPS）・録音音声（`/speech/audio`）・WebRTC シグナリングを送信、`/look_at`・`/speech/say`・`/expression` を受信 |
+| `/ui` | smabo-web | 制御指令送信 → esp32 / app へ中継、フィードバック受信 |
 | `/esp32` | smabo-esp32 | 制御指令受信、`/wheel_vel`・`/joint_states` 等を送信 |
+
+カメラ映像は WebSocket ではなく WebRTC で smabo-app から brain に届きます
+（シグナリングのみ WebSocket。`brain/webrtc_hub.py`）。
 
 メッセージ形式は rosbridge v2.0 互換 JSON。
 
@@ -45,6 +49,12 @@ brain はこの prefix を**剥がしてから** canonical なトピック名で
   ホイール径などのパラメータは、esp32 が接続時・設定変更時に push する config スナップショット
   （`set_config`）から自動同期します（config 自体の読み書きは web ↔ esp32 の REST 直通）。
   （将来 IMU/GPS とのフュージョンをここに追加できます）
+- **画像処理**: WebRTC で受けたカメラ映像から検出（aruco / color / face / qr、`brain/vision.py`）し、
+  `/vision/detections`・`/vision/markers` を web へ送出。`/vision/config` の `behaviors` に応じて
+  `/look_at`（app）・`/servo/command`・`/cmd_vel`（esp32）を出力します（首・走行の追従は PID）。
+  web がプレビューを要求したときは映像を web へ中継します。
+- **音声認識**: smabo-app の録音（`/speech/audio`、base64 WAV）を STT（vosk / faster-whisper、
+  `brain/stt.py`）にかけ、`/speech/recognized` を web へ送出します。
 
 ## 起動
 

@@ -75,9 +75,8 @@ def main() -> None:
     }
 
     print("smabo-brain relay server")
-    print(f"  smabo-app WS  : ws://<this-host>:{args.port}/")
-    print(f"  smabo-web WS  : ws://<this-host>:{args.port}/ui")
-    print(f"  smabo-esp32 WS: ws://<this-host>:{args.port}/esp32")
+    print(f"  WebSocket     : ws://<this-host>:{args.port}/  (rosbridge-compatible; app / web / esp32 / sim)")
+    print(f"  also          : /ui (web), /esp32 (ESP32) for clients that pick the path")
     if vision_config is not None:
         print(f"  vision config : {vision_config_path} (loaded)")
     else:

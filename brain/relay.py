@@ -9,7 +9,7 @@ from aiohttp import web
 from . import vision
 from .odometry import Odometry, build_pose_covariance, build_twist_covariance
 from .stt import SttEngine, wav_to_samples
-from .topics import APP_TOPICS as _APP_TOPICS, strip_prefix as _strip_prefix
+from .topics import APP_TOPICS as _APP_TOPICS, SOURCE_PREFIXES as _SOURCE_PREFIXES, strip_prefix as _strip_prefix
 from .vision import VisionConfig, merge_config
 from .webrtc_hub import WebRtcHub
 
@@ -343,25 +343,157 @@ def _notice(source: str, event: str, total: int) -> str:
     return json.dumps({"op": "notice", "source": source, "event": event, "total": total})
 
 
-async def _app_ws(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse()
+# ── クライアントの種類（role）と接続の出入り ─────────────────────────────
+#
+# 接続口は 2 系統ある:
+#   - 種類ごとのパス: "/ui"（web）, "/esp32"（ESP32）。パスで role が決まる。
+#   - 共通の "/": rosbridge_suite（smabo-brain-ros）と同じ接続口。どのクライアント
+#     も rosbridge と同じ手順（advertise / subscribe / publish）でつなげば、相手が
+#     smabo-brain でも smabo-brain-ros でも設定を変えずに動く。role は最初に届いた
+#     フレームから判別する（_role_of_frame）。
+
+_ROLE_CLIENTS: dict[str, set[web.WebSocketResponse]] = {
+    "app": _app_clients, "web": _ui_clients, "esp32": _esp32_clients,
+}
+
+# "/" で、subscribe しただけで role が分かるトピック（それを受け取るのはその role だけ）。
+# smabo-app は publish より先に /expression を subscribe するのでこれで判別できる。
+_SUBSCRIBE_ROLE: dict[str, str] = {
+    "/cmd_vel": "esp32", "/servo/command": "esp32",
+    **{t: "app" for t in _APP_TOPICS},
+}
+
+# rosbridge の接続管理 op。smabo-brain は購読に関係なく role ごとに配信するので、
+# role の判別に使うだけで中継はしない。
+_HOUSEKEEPING_OPS = frozenset({"advertise", "unadvertise", "subscribe", "unsubscribe"})
+
+
+def _role_of_frame(frame: dict) -> str | None:
+    """"/" に届いたフレームから送り主の role を推定する。分からなければ None。"""
+    op = frame.get("op")
+    topic = frame.get("topic")
+    if not isinstance(topic, str):
+        topic = ""
+    if op in ("publish", "advertise"):
+        for role, prefix in _SOURCE_PREFIXES.items():
+            if topic.startswith(prefix + "/"):
+                return role
+        return None
+    if op == "subscribe":
+        return _SUBSCRIBE_ROLE.get(topic)
+    if op == "set_config":
+        return "esp32"
+    return None
+
+
+async def _join(ws: web.WebSocketResponse, role: str) -> None:
+    """role の接続を登録し、web に接続通知を出す（web 自身には現在状態を送る）。"""
+    clients = _ROLE_CLIENTS[role]
+    clients.add(ws)
+    if role == "web":
+        log.info("UI connected (total=%d)", len(clients))
+        # 接続直後に現在の画像処理設定（起動時初期値 or 直近の上書き）を送り、
+        # UI が起動時から正しい状態を表示できるようにする。プレビュー映像は web が
+        # 明示的に /webrtc/preview {on:true} を送ったときだけ開始する（補助用途なので
+        # 既定では映像を流さない）。
+        try:
+            await ws.send_str(_vision_config_frame())
+            # 接続済みクライアントの現在状態をスナップショットとして送る
+            if _app_clients:
+                await ws.send_str(_notice("app", "connected", len(_app_clients)))
+            if _esp32_clients:
+                await ws.send_str(_notice("esp32", "connected", len(_esp32_clients)))
+        except Exception:
+            pass
+        return
+    log.info("%s connected (total=%d)", "ESP32" if role == "esp32" else role, len(clients))
+    await _broadcast(_ui_clients, _notice(role, "connected", len(clients)))
+
+
+async def _leave(ws: web.WebSocketResponse, role: str) -> None:
+    clients = _ROLE_CLIENTS[role]
+    clients.discard(ws)
+    if role == "web":
+        if _hub is not None:
+            await _hub.stop_web_preview(ws)
+        log.info("UI disconnected (total=%d)", len(clients))
+        return
+    if role == "app" and not clients and _hub is not None:
+        # 映像源（app）が切れたら WebRTC ピアと中継を畳む。
+        await _hub.close_app()
+    log.info("%s disconnected (total=%d)", "ESP32" if role == "esp32" else role, len(clients))
+    await _broadcast(_ui_clients, _notice(role, "disconnected", len(clients)))
+
+
+async def _dispatch(ws: web.WebSocketResponse, role: str, text: str) -> None:
+    if role == "app":
+        await _on_app_message(text)
+    elif role == "web":
+        await _on_ui_message(ws, text)
+    else:
+        await _on_esp32_message(text)
+
+
+async def _role_ws(request: web.Request, role: str, heartbeat: float | None = None) -> web.WebSocketResponse:
+    """パスで role が決まる接続口（"/ui", "/esp32"）。"""
+    ws = web.WebSocketResponse(heartbeat=heartbeat)
     await ws.prepare(request)
-    _app_clients.add(ws)
-    log.info("app connected (total=%d)", len(_app_clients))
-    await _broadcast(_ui_clients, _notice("app", "connected", len(_app_clients)))
+    await _join(ws, role)
     try:
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
-                await _on_app_message(msg.data)
+                await _dispatch(ws, role, msg.data)
             elif msg.type == aiohttp.WSMsgType.ERROR:
-                log.warning("app ws error: %s", ws.exception())
+                log.warning("%s ws error: %s", role, ws.exception())
     finally:
-        _app_clients.discard(ws)
-        if not _app_clients and _hub is not None:
-            # 映像源（app）が切れたら WebRTC ピアと中継を畳む。
-            await _hub.close_app()
-        log.info("app disconnected (total=%d)", len(_app_clients))
-        await _broadcast(_ui_clients, _notice("app", "disconnected", len(_app_clients)))
+        await _leave(ws, role)
+    return ws
+
+
+async def _ui_ws(request: web.Request) -> web.WebSocketResponse:
+    return await _role_ws(request, "web")
+
+
+async def _esp32_ws(request: web.Request) -> web.WebSocketResponse:
+    # heartbeat: send a WS ping every 5 s; close if no pong within 5 s.
+    # Detects a powered-off ESP32 within ~10 s (worst case: just missed a ping).
+    # The ESP32 ws_client.py handles opcode 0x9 (ping) and replies with 0xA (pong).
+    return await _role_ws(request, "esp32", heartbeat=5)
+
+
+async def _root_ws(request: web.Request) -> web.WebSocketResponse:
+    """rosbridge 互換の共通接続口 "/"。role はフレームの中身から判別する。
+
+    rosbridge クライアント（advertise / subscribe してから publish）はそのまま
+    動く。advertise / subscribe 自体は role の判別にだけ使い、配信は従来どおり
+    role ごとの宛先ルールで行う。role が分かる前の判別できないフレームは捨てる
+    （例: roslibjs の call_service。smabo-brain には ROS サービスが無い）。
+    """
+    ws = web.WebSocketResponse(heartbeat=5)
+    await ws.prepare(request)
+    role: str | None = None
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    frame = json.loads(msg.data)
+                except Exception:
+                    frame = None
+                if not isinstance(frame, dict):
+                    continue
+                if role is None:
+                    role = _role_of_frame(frame)
+                    if role is None:
+                        continue
+                    await _join(ws, role)
+                if frame.get("op") in _HOUSEKEEPING_OPS:
+                    continue
+                await _dispatch(ws, role, msg.data)
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                log.warning("ws error: %s", ws.exception())
+    finally:
+        if role is not None:
+            await _leave(ws, role)
     return ws
 
 
@@ -418,102 +550,49 @@ async def _on_app_message(text: str) -> None:
     await _broadcast(_ui_clients, text)
 
 
-async def _ui_ws(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    _ui_clients.add(ws)
-    log.info("UI connected (total=%d)", len(_ui_clients))
-    # 接続直後に現在の画像処理設定（起動時初期値 or 直近の上書き）を送り、
-    # UI が起動時から正しい状態を表示できるようにする。プレビュー映像は web が
-    # 明示的に /webrtc/preview {on:true} を送ったときだけ開始する（補助用途なので
-    # 既定では映像を流さない）。
+async def _on_ui_message(ws: web.WebSocketResponse, text: str) -> None:
+    """web → brain。brain が消費するもの以外は宛先デバイス（app / esp32）へ中継。"""
     try:
-        await ws.send_str(_vision_config_frame())
-        # 接続済みクライアントの現在状態をスナップショットとして送る
-        if _app_clients:
-            await ws.send_str(_notice("app", "connected", len(_app_clients)))
-        if _esp32_clients:
-            await ws.send_str(_notice("esp32", "connected", len(_esp32_clients)))
+        frame = json.loads(text)
     except Exception:
-        pass
-    try:
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                try:
-                    frame = json.loads(msg.data)
-                except Exception:
-                    frame = None
+        return
+    if not isinstance(frame, dict):
+        return
 
-                if not isinstance(frame, dict):
-                    continue
+    if frame.get("op") != "publish":
+        await _broadcast(_esp32_clients, text)
+        return
 
-                op = frame.get("op")
-
-                if op == "publish":
-                    topic = _strip_prefix(frame.get("topic", ""), "/web")
-                    frame["topic"] = topic
-                    if topic == "/vision/config":
-                        _apply_vision_config(frame.get("msg") or {})
-                        if _hub is not None:
-                            _hub.set_fps(_vision.capture_fps)
-                        # 全 UI に正規化済みスナップショットを返して同期する。
-                        await _broadcast(_ui_clients, _vision_config_frame())
-                        continue
-                    # WebRTC プレビュー（web ↔ brain）。brain が中継ピアとして消費。
-                    if topic == "/webrtc/preview":
-                        if _hub is not None:
-                            on = bool(_frame_data_json(frame).get("on"))
-                            if on:
-                                await _hub.start_web_preview(ws)
-                            else:
-                                await _hub.stop_web_preview(ws)
-                        continue
-                    if topic == "/webrtc/web_answer":
-                        if _hub is not None:
-                            await _hub.handle_web_answer(ws, _frame_data_json(frame))
-                        continue
-                    if topic == "/webrtc/web_ice":
-                        if _hub is not None:
-                            await _hub.add_web_ice(ws, _frame_data_json(frame))
-                        continue
-                    data = json.dumps(frame)
-                    if topic in _APP_TOPICS:
-                        await _broadcast(_app_clients, data)
-                    else:
-                        await _broadcast(_esp32_clients, data)
-                else:
-                    await _broadcast(_esp32_clients, msg.data)
-
-            elif msg.type == aiohttp.WSMsgType.ERROR:
-                log.warning("UI ws error: %s", ws.exception())
-    finally:
-        _ui_clients.discard(ws)
+    topic = _strip_prefix(frame.get("topic", ""), "/web")
+    frame["topic"] = topic
+    if topic == "/vision/config":
+        _apply_vision_config(frame.get("msg") or {})
         if _hub is not None:
-            await _hub.stop_web_preview(ws)
-        log.info("UI disconnected (total=%d)", len(_ui_clients))
-    return ws
-
-
-async def _esp32_ws(request: web.Request) -> web.WebSocketResponse:
-    # heartbeat: send a WS ping every 5 s; close if no pong within 5 s.
-    # Detects a powered-off ESP32 within ~10 s (worst case: just missed a ping).
-    # The ESP32 ws_client.py handles opcode 0x9 (ping) and replies with 0xA (pong).
-    ws = web.WebSocketResponse(heartbeat=5)
-    await ws.prepare(request)
-    _esp32_clients.add(ws)
-    log.info("ESP32 connected (total=%d)", len(_esp32_clients))
-    await _broadcast(_ui_clients, _notice("esp32", "connected", len(_esp32_clients)))
-    try:
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                await _on_esp32_message(msg.data)
-            elif msg.type == aiohttp.WSMsgType.ERROR:
-                log.warning("ESP32 ws error: %s", ws.exception())
-    finally:
-        _esp32_clients.discard(ws)
-        log.info("ESP32 disconnected (total=%d)", len(_esp32_clients))
-        await _broadcast(_ui_clients, _notice("esp32", "disconnected", len(_esp32_clients)))
-    return ws
+            _hub.set_fps(_vision.capture_fps)
+        # 全 UI に正規化済みスナップショットを返して同期する。
+        await _broadcast(_ui_clients, _vision_config_frame())
+        return
+    # WebRTC プレビュー（web ↔ brain）。brain が中継ピアとして消費。
+    if topic == "/webrtc/preview":
+        if _hub is not None:
+            if _frame_data_json(frame).get("on"):
+                await _hub.start_web_preview(ws)
+            else:
+                await _hub.stop_web_preview(ws)
+        return
+    if topic == "/webrtc/web_answer":
+        if _hub is not None:
+            await _hub.handle_web_answer(ws, _frame_data_json(frame))
+        return
+    if topic == "/webrtc/web_ice":
+        if _hub is not None:
+            await _hub.add_web_ice(ws, _frame_data_json(frame))
+        return
+    data = json.dumps(frame)
+    if topic in _APP_TOPICS:
+        await _broadcast(_app_clients, data)
+    else:
+        await _broadcast(_esp32_clients, data)
 
 
 async def _on_esp32_message(text: str) -> None:
@@ -552,6 +631,16 @@ async def _on_esp32_message(text: str) -> None:
 
         # その他の publish は canonical なトピック名で web に再配信
         # （カメラ＝画像処理の入口は app 経路。_on_app_message を参照）
+        if topic == "/config":
+            # rosbridge 手順でつなぐ ESP32 / smabo-sim は、set_config op の代わりに
+            # config（wifi を除く）を /esp32/config（std_msgs/String の data に JSON）
+            # で publish する。web へは流さない。
+            cfg = _frame_data_json(m)
+            if cfg:
+                _odom.update_config(cfg)
+                _update_esp32_joints(cfg)
+            return
+
         await _broadcast(_ui_clients, json.dumps(m))
         return
 
@@ -599,7 +688,7 @@ def create_app(vision_config: dict | None = None,
     _stt = SttEngine(**(stt_config or {}))
 
     app = web.Application()
-    app.router.add_get("/",      _app_ws)
+    app.router.add_get("/",      _root_ws)
     app.router.add_get("/ui",    _ui_ws)
     app.router.add_get("/esp32", _esp32_ws)
     return app
