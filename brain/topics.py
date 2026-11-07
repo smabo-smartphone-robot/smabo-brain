@@ -54,6 +54,7 @@ PUBLISH: dict[str, dict[str, str]] = {
         "/joint_states":      "sensor_msgs/msg/JointState",
         "/scan":              "sensor_msgs/msg/LaserScan",
         "/pong":              "std_msgs/msg/String",
+        "/config_url":        "std_msgs/msg/String",   # its REST base URL, every 5 s
     },
 }
 
@@ -69,6 +70,7 @@ SUBSCRIBE: dict[str, dict[str, str]] = {
         "/vision/detections": "vision_msgs/msg/Detection2DArray",
         "/vision/markers":    "std_msgs/msg/String",
         "/webrtc/web_offer":  "std_msgs/msg/String",
+        "/config_url":        "std_msgs/msg/String",
     },
     "app": {
         "/expression":        "std_msgs/msg/Int32",
