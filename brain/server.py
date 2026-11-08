@@ -123,7 +123,10 @@ class Brain:
         if op == "auth":
             p = self.pairings.check(frame.get("token"))
             if p is None:
-                log.warning("%s showed an unknown token; it needs to pair again", remote)
+                if frame.get("token"):
+                    log.warning("%s showed an unknown token; it needs to pair again", remote)
+                else:
+                    log.info("%s is not paired yet", remote)
                 await self._refuse(ws, "auth", "unauthorized", "Unknown token. Pair again")
                 return None
             self.pairings.seen(p)
@@ -235,6 +238,11 @@ class Brain:
                 except ValueError:
                     continue
                 if not isinstance(frame, dict):
+                    continue
+                if role is None and frame.get("op") in ("auth", "pair"):
+                    # --no-auth: say so at once, so a client need not wait for a reply
+                    await self._send(ws, json.dumps({"op": frame["op"], "ok": frame["op"] == "auth",
+                                                     "auth": False, "reason": "no_auth"}))
                     continue
                 if role is None:
                     # 役割が分かるまでのフレーム（roslibjs の call_service など）は捨てる

@@ -200,6 +200,10 @@ def test_no_auth_mode_relays_without_a_key(tmp_path):
         await client.start_server()
         try:
             assert (await client.get("/pairings")).status == 404
+            ws = await client.ws_connect("/")
+            await ws.send_json({"op": "auth", "token": ""})
+            assert (await ws.receive_json(timeout=2))["ok"] is True
+            await ws.close()
             assert (await client.get("/devices/esp32/config")).status == 504
         finally:
             await client.close()
