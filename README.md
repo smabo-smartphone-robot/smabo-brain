@@ -43,6 +43,19 @@ brain は最初に届いたフレーム（prefix 付きの advertise / publish�
 
 メッセージ形式は rosbridge v2.0 互換 JSON。
 
+## バージョンと互換性
+
+smabo のリポジトリは、同じ minor 番号（`0.2.x` など）どうしで組み合わせます。
+つながるかどうかを決めるのは、`/hello` と `/brain/info` で送り合うプロトコル番号です。
+
+| プロトコル | smabo-brain / brain-ros | smabo-web | smabo-app | smabo-esp32 | smabo-sim | 変更点 |
+|-----------|------------------------|-----------|-----------|-------------|-----------|--------|
+| 1 | 0.2.x | 0.2.x | 0.2.x | 0.2.x | 0.2.x | `/hello`・`/brain/info` でプロトコル番号を確かめる。`GET /config` は Wi-Fi パスワードを返さない |
+| （なし） | 0.1.x | 0.1.x | 0.1.x | （番号なし） | 0.1.x | プロトコル番号の確認なし |
+
+番号を上げたら、この表に行を足してください。`tests/test_protocol.py` は、隣にチェックアウト
+されている各リポジトリのプロトコル番号とバージョンが、brain と合っているかを確かめます。
+
 設定（config / mode）は brain を経由しません。smabo-web は ESP32 の REST API
 （`http://<esp32>/config`・`/mode`）へ直接アクセスします。brain はオドメトリ積分に
 必要な車輪ジオメトリ等のため、ESP32 が `/esp32/config`（std_msgs/String の data に JSON、

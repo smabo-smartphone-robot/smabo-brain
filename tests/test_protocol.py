@@ -104,3 +104,39 @@ def test_every_subscribed_topic_has_a_publisher_or_comes_from_the_brain():
     for client, topics in SUBSCRIBE.items():
         for t in topics:
             assert t in published or t in from_brain, f"{client} reads {t}, which nobody sends"
+
+
+# ── protocol number and version of every component ────────────────────────
+from brain import __version__ as BRAIN_VERSION
+from brain.topics import PROTOCOL_VERSION
+
+# (file, regex for the protocol number or None, regex for the version)
+COMPONENTS = {
+    "smabo-brain":     ("smabo-brain/pyproject.toml", None, r'^version = "([^"]+)"'),
+    "smabo-web":       ("smabo-web/src/version.ts", r"PROTOCOL_VERSION = (\d+)", r"WEB_VERSION = '([^']+)'"),
+    "smabo-app":       ("smabo-app/lib/core/wire/ros_compat.dart", r"static const version = (\d+);", None),
+    "smabo-app (pubspec)": ("smabo-app/pubspec.yaml", None, r"^version: ([0-9.]+)"),
+    "smabo-esp32":     ("smabo-esp32/brain_link.py", r"PROTOCOL_VERSION = (\d+)", r'FIRMWARE_VERSION = "([^"]+)"'),
+    "smabo-sim":       ("smabo-sim/smabo_sim/protocol.py", r"PROTOCOL_VERSION = (\d+)", None),
+    "smabo-sim (package)": ("smabo-sim/pyproject.toml", None, r'^version = "([^"]+)"'),
+    "smabo-brain-ros": ("smabo-brain-ros/smabo_brain_ros/smabo_brain_ros/protocol_node.py", None,
+                        r'BRAIN_VERSION = "([^"]+)"'),
+}
+
+
+@pytest.mark.parametrize("name", list(COMPONENTS))
+def test_component_speaks_this_protocol_and_shares_the_minor_version(name):
+    """Every component's protocol number is brain.topics.PROTOCOL_VERSION, and
+    the versions agree up to the minor number (the README's compatibility table)."""
+    rel, proto_re, version_re = COMPONENTS[name]
+    src = _source(rel)
+    if proto_re:
+        assert int(re.search(proto_re, src, re.M).group(1)) == PROTOCOL_VERSION, rel
+    if version_re:
+        version = re.search(version_re, src, re.M).group(1)
+        assert version.split(".")[:2] == BRAIN_VERSION.split(".")[:2], (rel, version)
+
+
+def test_package_version_matches_brain_init():
+    src = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    assert re.search(r'^version = "([^"]+)"', src, re.M).group(1) == BRAIN_VERSION
