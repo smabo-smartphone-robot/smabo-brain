@@ -125,6 +125,7 @@ HTTP API（smabo-web 用。`Authorization: Bearer <ブラウザの token>` が�
 smabo-web のタブが複数開いていても、走行（`/cmd_vel`）とアーム（`/servo/command`）を送れるのは 1 つのタブだけです（`brain/control.py`）。
 
 - 誰も操作していないとき、最初に走行・アームの指令を送ったタブが操作権を取る
+- 止める指令（速度 0 の `/cmd_vel`）だけは、どのタブからでも通す（操作権は取らない）
 - ほかのタブの指令は捨てる。そのタブには「○○が操作中」と「操作を引き継ぐ」（`{"op": "control", "action": "claim"}`）を出す
 - 操作中のタブは `{"op": "control", "action": "release"}` で手放す。タブを閉じる・切れたときも手放す
 - 操作権が別のタブへ移る・手放されると、brain は ESP32 に止まる指令（速度 0 の `/cmd_vel`）を送る

@@ -33,7 +33,7 @@ from aiohttp import web
 
 from . import frames, hello
 from .clients import HOUSEKEEPING_OPS, Clients, role_of_frame
-from .control import CONTROL_TOPICS, Control
+from .control import CONTROL_TOPICS, Control, is_stop
 from .gateway import Gateway, cors_middleware
 from .odometry import Odometry
 from .pairing import Pairing, PairingError, Pairings
@@ -330,7 +330,7 @@ class Brain:
     # ── 役割ごとの処理（frame["topic"] は送り主の名前を外した正式名） ─────────
     async def _from_web(self, ws: web.WebSocketResponse, frame: dict) -> None:
         topic = frame["topic"]
-        if topic in CONTROL_TOPICS:
+        if topic in CONTROL_TOPICS and not is_stop(frame):
             allowed, changed = self.control.allow(ws, self.web_names.get(ws, "browser"))
             if changed:
                 await self._control_changed(stop=False)     # nobody was driving

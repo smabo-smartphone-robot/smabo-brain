@@ -10,6 +10,8 @@ speed many times a second.
 * Someone holds it: commands from the other browsers are dropped. They show
   "<holder> is driving" and a "Take over" button (``{"op": "control",
   "action": "claim"}``), which hands control over at once.
+* Anyone may stop the robot: a zero ``/cmd_vel`` always goes through (and
+  does not claim control).
 * The holder lets go with ``{"op": "control", "action": "release"}``, or by
   closing the tab / losing the connection.
 
@@ -24,6 +26,20 @@ import json
 from typing import Hashable
 
 CONTROL_TOPICS = frozenset({"/cmd_vel", "/servo/command"})
+
+
+def is_stop(frame: dict) -> bool:
+    """A ``/cmd_vel`` with every speed zero (allowed from any browser)."""
+    if frame.get("topic") != "/cmd_vel":
+        return False
+    msg = frame.get("msg")
+    if not isinstance(msg, dict):
+        return False
+    try:
+        return all(float((msg.get(part) or {}).get(axis, 0) or 0) == 0.0
+                   for part in ("linear", "angular") for axis in ("x", "y", "z"))
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 class Control:

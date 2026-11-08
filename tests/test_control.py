@@ -5,7 +5,7 @@ import json
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from brain.control import Control
+from brain.control import Control, is_stop
 from brain.server import create_app
 
 
@@ -29,6 +29,17 @@ def test_take_over_and_release():
     assert c.allow("a", "PC1") == (True, True)
 
 
+def test_stop_is_a_zero_cmd_vel():
+    zero = {"linear": {"x": 0, "y": 0, "z": 0}, "angular": {"x": 0.0, "y": 0, "z": 0}}
+    assert is_stop({"topic": "/cmd_vel", "msg": zero})
+    assert is_stop({"topic": "/cmd_vel", "msg": {}})
+    assert not is_stop({"topic": "/cmd_vel", "msg": {"linear": {"x": 0.1}}})
+    assert not is_stop({"topic": "/servo/command", "msg": zero})
+    assert not is_stop({"topic": "/cmd_vel", "msg": {"linear": {"x": "fast"}}})
+
+
+STOP = {"op": "publish", "topic": "/web/cmd_vel",
+        "msg": {"linear": {"x": 0, "y": 0, "z": 0}, "angular": {"x": 0, "y": 0, "z": 0}}}
 CMD = {"op": "publish", "topic": "/web/cmd_vel",
        "msg": {"linear": {"x": 0.3, "y": 0, "z": 0}, "angular": {"x": 0, "y": 0, "z": 0}}}
 
@@ -80,9 +91,12 @@ def test_two_browsers_over_the_brain():
             assert _control(await _frames(b))[-1] == {"op": "notice", "event": "control",
                                                       "holder": "browser 1", "you": False}
 
-            # B's commands are dropped
+            # B's commands are dropped, but B may always stop the robot
             await b.send_json(CMD)
             assert _cmd_x(await _frames(esp)) == []
+            await b.send_json(STOP)
+            assert _cmd_x(await _frames(esp)) == [0]
+            assert _control(await _frames(b)) == []           # A still holds control
 
             # B takes over: stop, and B drives
             await b.send_json({"op": "control", "action": "claim"})
