@@ -28,7 +28,7 @@ brain は最初に届いたフレーム（prefix 付きの advertise / publish�
 
 | 接続元 | おもな送信 | おもな受信 |
 |--------|-----------|-----------|
-| smabo-app | IMU/GPS、録音音声（`/speech/audio`）、WebRTC シグナリング | `/look_at`・`/speech/say`・`/expression` |
+| smabo-app | IMU/GPS、録音音声（`/speech/audio`）、WebRTC シグナリング | `/look_at`・`/speech/say`・`/expression`（表情の名前、String） |
 | smabo-web | 制御指令（esp32 / app へ中継） | `/odom`・センサ・画像処理の結果 |
 | smabo-esp32 | `/wheel_vel`・`/joint_states`・`/scan`・`/config` | `/cmd_vel`・`/servo/command` |
 

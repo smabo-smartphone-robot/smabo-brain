@@ -8,8 +8,12 @@
           /webrtc/* は brain が受け取る。それ以外は esp32 へ。
   app   → /webrtc/offer, /webrtc/app_ice, /speech/audio は brain が受け取る。
           それ以外は web へ。
-  esp32 → /wheel_vel は積分して /odom を web へ。/config は brain が受け取る。
-          それ以外は web へ。
+  esp32 → /wheel_vel は積分して /odom を web へ。/config は brain も受け取り
+          （オドメトリ用）、変更の知らせとして web へも流す。それ以外は web へ。
+
+設定はどの機器も REST で直接読み書きする（ESP32 は :80、スマホは :8081 の
+GET/POST /config）。brain は場所（/config_url, /phone/config_url）と変更の知らせ
+（/config, /phone/config）を web へ中継するだけ。
 """
 
 import asyncio
@@ -23,7 +27,7 @@ from . import frames
 from .clients import HOUSEKEEPING_OPS, Clients, role_of_frame
 from .odometry import Odometry
 from .speech import Speech
-from .topics import APP_TOPICS, SOURCE_PREFIXES, strip_prefix
+from .topics import APP_TOPICS, ROS_ONLY_TOPICS, SOURCE_PREFIXES, strip_prefix
 from .vision_pipeline import VisionPipeline
 from .webrtc_hub import WebRtcHub
 
@@ -149,6 +153,8 @@ class Brain:
             await self.hub.handle_web_answer(ws, frames.data_json(frame))
         elif topic == "/webrtc/web_ice":
             await self.hub.add_web_ice(ws, frames.data_json(frame))
+        elif topic in ROS_ONLY_TOPICS:
+            pass        # navigation exists only in smabo-brain-ros
         else:
             await self.clients.send("app" if topic in APP_TOPICS else "esp32", json.dumps(frame))
 
@@ -174,12 +180,13 @@ class Brain:
                 await self.clients.send("web", frames.odom(r))
         elif topic == "/config":
             # 車輪の寸法・共分散・frame 名（オドメトリ用）と実在関節名（画像処理の
-            # 首振り用）の同期にだけ使い、web へは流さない。config 自体は web と
-            # ESP32 が REST で直接やりとりする。
+            # 首振り用）の同期に使う。web へは「設定が変わった」知らせとして流す
+            # （web は REST で読み直す。config 自体は web と ESP32 が直接やりとり）。
             cfg = frames.data_json(frame)
             if cfg:
                 self.odom.update_config(cfg)
                 self.vision.update_joints(cfg)
+            await self.clients.send("web", json.dumps(frame))
         else:
             if topic == "/joint_states":
                 self.vision.update_joint_angles(msg)

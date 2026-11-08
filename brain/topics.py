@@ -32,8 +32,9 @@ PUBLISH: dict[str, dict[str, str]] = {
         "/servo/command":     "trajectory_msgs/msg/JointTrajectory",
         "/initialpose":       "geometry_msgs/msg/PoseWithCovarianceStamped",
         "/goal_pose":         "geometry_msgs/msg/PoseStamped",
+        "/nav/command":       "std_msgs/msg/String",   # nav_manager: SLAM / save map / navigate (JSON)
         "/speech/say":        "std_msgs/msg/String",
-        "/expression":        "std_msgs/msg/Int32",
+        "/expression":        "std_msgs/msg/String",   # expression name (smabo-app)
         "/look_at":           "geometry_msgs/msg/PoseStamped",
         "/ping":              "std_msgs/msg/String",
         "/vision/config":     "std_msgs/msg/String",
@@ -47,6 +48,8 @@ PUBLISH: dict[str, dict[str, str]] = {
         "/speech/audio":      "audio_common_msgs/msg/AudioData",
         "/webrtc/offer":      "std_msgs/msg/String",
         "/webrtc/app_ice":    "std_msgs/msg/String",
+        "/phone/config":      "std_msgs/msg/String",   # its settings (JSON in data), on change
+        "/phone/config_url":  "std_msgs/msg/String",   # its REST base URL, every 5 s
     },
     "esp32": {
         "/config":            "std_msgs/msg/String",   # config snapshot (minus wifi), JSON in data
@@ -70,10 +73,13 @@ SUBSCRIBE: dict[str, dict[str, str]] = {
         "/vision/detections": "vision_msgs/msg/Detection2DArray",
         "/vision/markers":    "std_msgs/msg/String",
         "/webrtc/web_offer":  "std_msgs/msg/String",
+        "/config":            "std_msgs/msg/String",   # ESP32 settings changed (re-read over REST)
         "/config_url":        "std_msgs/msg/String",
+        "/phone/config":      "std_msgs/msg/String",
+        "/phone/config_url":  "std_msgs/msg/String",
     },
     "app": {
-        "/expression":        "std_msgs/msg/Int32",
+        "/expression":        "std_msgs/msg/String",
         "/look_at":           "geometry_msgs/msg/PoseStamped",
         "/speech/say":        "std_msgs/msg/String",
         "/webrtc/answer":     "std_msgs/msg/String",
@@ -87,6 +93,12 @@ SUBSCRIBE: dict[str, dict[str, str]] = {
 
 # Topics that smabo-web addresses to smabo-app (not the ESP32).  Used by
 # smabo-brain to route ``/web`` publishes.
+# Topics smabo-web sends only for smabo-brain-ros (Nav2 and its nav_manager).
+# smabo-brain has no navigation, so it drops them instead of forwarding.
+ROS_ONLY_TOPICS: frozenset[str] = frozenset({
+    "/initialpose", "/goal_pose", "/nav/command",
+})
+
 APP_TOPICS: frozenset[str] = frozenset({
     "/speech/say", "/expression", "/look_at",
 })

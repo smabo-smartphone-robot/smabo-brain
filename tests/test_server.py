@@ -47,7 +47,7 @@ async def _connect_web(client):
 
 async def _connect_app(client):
     ws = await client.ws_connect("/")
-    await ws.send_json({"op": "subscribe", "topic": "/expression", "type": "std_msgs/msg/Int32"})
+    await ws.send_json({"op": "subscribe", "topic": "/expression", "type": "std_msgs/msg/String"})
     return ws
 
 
@@ -108,15 +108,15 @@ def test_app_topics_go_to_app_not_esp32():
             app = await _connect_app(client)
             web = await _connect_web(client)
             await asyncio.sleep(0.05)
-            await web.send_json({"op": "publish", "topic": "/web/expression", "msg": {"data": 3}})
-            assert {"op": "publish", "topic": "/expression", "msg": {"data": 3}} in await _recv_all(app)
+            await web.send_json({"op": "publish", "topic": "/web/expression", "msg": {"data": "Angry"}})
+            assert {"op": "publish", "topic": "/expression", "msg": {"data": "Angry"}} in await _recv_all(app)
             assert not [f for f in await _recv_all(esp) if f.get("topic") == "/expression"]
         finally:
             await client.close()
     run(go())
 
 
-def test_esp32_config_sets_odometry_and_wheel_vel_becomes_odom():
+def test_esp32_config_sets_odometry_reaches_web_and_wheel_vel_becomes_odom():
     async def go():
         client = await _client()
         try:
@@ -130,7 +130,8 @@ def test_esp32_config_sets_odometry_and_wheel_vel_becomes_odom():
             await esp.send_json({"op": "publish", "topic": "/esp32/wheel_vel",
                                  "msg": {"left": -0.1, "right": 0.1, "dt": 0.1}})
             got = await _recv_all(web)
-            assert not [f for f in got if f.get("topic") == "/config"]   # config stays in the brain
+            # web hears that the config changed (it re-reads it over REST)
+            assert [f for f in got if f.get("topic") == "/config"]
             odom = [f for f in got if f.get("topic") == "/odom"]
             assert odom and abs(odom[-1]["msg"]["twist"]["twist"]["angular"]["z"] - 0.4) < 1e-6
             assert client.app[BRAIN_KEY].vision.joints == {"head_pan"}
@@ -149,6 +150,44 @@ def test_frames_before_the_role_is_known_are_ignored():
             await stranger.send_json({"op": "publish", "topic": "/cmd_vel", "msg": TWIST})
             assert not [f for f in await _recv_all(esp) if f.get("op") == "publish"]
             assert client.app[BRAIN_KEY].clients.count("web") == 0
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_navigation_topics_are_not_forwarded():
+    """/initialpose, /goal_pose and /nav/command are for smabo-brain-ros only."""
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await web.send_json({"op": "publish", "topic": "/web/nav/command",
+                                 "msg": {"data": '{"op": "mapping"}'}})
+            await web.send_json({"op": "publish", "topic": "/web/cmd_vel", "msg": TWIST})
+            got = await _recv_all(esp)
+            assert [f["topic"] for f in got if f["op"] == "publish"] == ["/cmd_vel"]
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_phone_config_notices_reach_web():
+    """The phone announces its REST URL and its settings; web gets both."""
+    async def go():
+        client = await _client()
+        try:
+            app = await _connect_app(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await _recv_all(web)
+            await app.send_json({"op": "publish", "topic": "/app/phone/config_url",
+                                 "msg": {"data": "http://192.168.1.20:8081"}})
+            await app.send_json({"op": "publish", "topic": "/app/phone/config",
+                                 "msg": {"data": json.dumps({"speech": {"tts": False}})}})
+            topics = [f.get("topic") for f in await _recv_all(web)]
+            assert "/phone/config_url" in topics and "/phone/config" in topics
         finally:
             await client.close()
     run(go())
