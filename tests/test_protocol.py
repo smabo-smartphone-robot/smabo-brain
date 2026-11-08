@@ -98,7 +98,7 @@ def test_sim_tables_match():
 def test_every_subscribed_topic_has_a_publisher_or_comes_from_the_brain():
     """Catch typos: a topic someone reads must be published by a client, or be
     one the brain itself produces."""
-    from_brain = {"/odom", "/vision/config", "/vision/detections", "/vision/markers",
+    from_brain = {"/odom", "/brain/info", "/vision/config", "/vision/detections", "/vision/markers",
                   "/speech/recognized", "/webrtc/web_offer", "/webrtc/answer"}
     published = {t for topics in PUBLISH.values() for t in topics}
     for client, topics in SUBSCRIBE.items():

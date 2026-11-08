@@ -148,7 +148,8 @@ def test_frames_before_the_role_is_known_are_ignored():
             stranger = await client.ws_connect("/")
             await stranger.send_json({"op": "call_service", "service": "/rosapi/topics"})
             await stranger.send_json({"op": "publish", "topic": "/cmd_vel", "msg": TWIST})
-            assert not [f for f in await _recv_all(esp) if f.get("op") == "publish"]
+            assert not [f for f in await _recv_all(esp)
+                        if f.get("op") == "publish" and f.get("topic") != "/brain/info"]
             assert client.app[BRAIN_KEY].clients.count("web") == 0
         finally:
             await client.close()
@@ -167,7 +168,7 @@ def test_navigation_topics_are_not_forwarded():
                                  "msg": {"data": '{"op": "mapping"}'}})
             await web.send_json({"op": "publish", "topic": "/web/cmd_vel", "msg": TWIST})
             got = await _recv_all(esp)
-            assert [f["topic"] for f in got if f["op"] == "publish"] == ["/cmd_vel"]
+            assert [f["topic"] for f in got if f["op"] == "publish"] == ["/brain/info", "/cmd_vel"]
         finally:
             await client.close()
     run(go())
@@ -188,6 +189,55 @@ def test_phone_config_notices_reach_web():
                                  "msg": {"data": json.dumps({"speech": {"tts": False}})}})
             topics = [f.get("topic") for f in await _recv_all(web)]
             assert "/phone/config_url" in topics and "/phone/config" in topics
+        finally:
+            await client.close()
+    run(go())
+
+
+def _info(frames):
+    return [json.loads(f["msg"]["data"]) for f in frames if f.get("topic") == "/brain/info"]
+
+
+def test_brain_info_on_join_and_hello_notice_to_web():
+    """Clients get /brain/info on connect; a /hello is answered and shown to web."""
+    async def go():
+        client = await _client()
+        try:
+            web = await _connect_web(client)
+            esp = await _connect_esp32(client)
+            info = _info(await _recv_all(esp))
+            assert info and info[0]["brain"] == "smabo-brain" and info[0]["protocol"] == 1
+            await _recv_all(web)
+            await esp.send_json({"op": "publish", "topic": "/esp32/hello", "msg": {"data": json.dumps(
+                {"protocol": 1, "client": "smabo-esp32", "version": "0.1.0"})}})
+            assert _info(await _recv_all(esp))           # answered
+            got = [f for f in await _recv_all(web) if f.get("event") == "hello"]
+            assert got == [{"op": "notice", "source": "esp32", "event": "hello",
+                            "client": "smabo-esp32", "version": "0.1.0",
+                            "protocol": 1, "expected": 1, "ok": True}]
+            # a web that connects later learns the ESP32's hello too
+            web2 = await _connect_web(client)
+            assert [f for f in await _recv_all(web2) if f.get("event") == "hello"] == got
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_protocol_mismatch_is_flagged_and_hello_is_not_relayed():
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            app = await _connect_app(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await _recv_all(web)
+            await _recv_all(esp)
+            await app.send_json({"op": "publish", "topic": "/app/hello", "msg": {"data": json.dumps(
+                {"protocol": 0, "client": "smabo-app", "version": "0.0.9"})}})
+            notes = [f for f in await _recv_all(web) if f.get("event") == "hello"]
+            assert notes[0]["ok"] is False and notes[0]["protocol"] == 0 and notes[0]["expected"] == 1
+            assert not [f for f in await _recv_all(esp) if f.get("topic") == "/hello"]
         finally:
             await client.close()
     run(go())

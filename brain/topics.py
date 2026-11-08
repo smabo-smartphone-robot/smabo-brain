@@ -7,6 +7,10 @@ it is — smabo-brain or smabo-brain-ros (rosbridge_suite):
   1. connect to ``ws://<brain>:9090/``
   2. ``advertise`` every topic it publishes, ``subscribe`` every topic it reads
   3. ``publish`` with its source prefix (``/web``, ``/app``, ``/esp32``)
+  4. ``publish`` ``/hello`` once: ``{"protocol": N, "client": name, "version": x.y.z}``.
+     The brain answers on ``/brain/info`` (``{"protocol": N, "brain": name,
+     "version": x.y.z}``, also repeated every 5 s) and each side warns when the
+     protocol numbers differ.
 
 The brain strips the prefix and delivers the message under the canonical name.
 smabo-brain does that inline (brain/server.py); smabo-brain-ros, which wraps
@@ -17,6 +21,11 @@ This module is the single source of truth for the tables. Clients written in
 other languages (web: TypeScript, app: Dart, ESP32: MicroPython) keep their own
 copy, and ``tests/test_protocol.py`` checks each copy against this one.
 """
+
+# Version of these tables and the meaning of the messages on them. Bump it when
+# a topic is renamed or removed, or a message changes type or meaning; clients
+# with a different number are warned on connect (see /hello and /brain/info).
+PROTOCOL_VERSION = 1
 
 # Source prefix each client puts in front of the topics it publishes.
 SOURCE_PREFIXES: dict[str, str] = {
@@ -41,6 +50,7 @@ PUBLISH: dict[str, dict[str, str]] = {
         "/webrtc/preview":    "std_msgs/msg/String",
         "/webrtc/web_answer": "std_msgs/msg/String",
         "/webrtc/web_ice":    "std_msgs/msg/String",
+        "/hello":             "std_msgs/msg/String",   # protocol / version, once on connect
     },
     "app": {
         "/imu/data":          "sensor_msgs/msg/Imu",
@@ -50,6 +60,7 @@ PUBLISH: dict[str, dict[str, str]] = {
         "/webrtc/app_ice":    "std_msgs/msg/String",
         "/phone/config":      "std_msgs/msg/String",   # its settings (JSON in data), on change
         "/phone/config_url":  "std_msgs/msg/String",   # its REST base URL, every 5 s
+        "/hello":             "std_msgs/msg/String",
     },
     "esp32": {
         "/config":            "std_msgs/msg/String",   # config snapshot (minus wifi), JSON in data
@@ -58,6 +69,7 @@ PUBLISH: dict[str, dict[str, str]] = {
         "/scan":              "sensor_msgs/msg/LaserScan",
         "/pong":              "std_msgs/msg/String",
         "/config_url":        "std_msgs/msg/String",   # its REST base URL, every 5 s
+        "/hello":             "std_msgs/msg/String",
     },
 }
 
@@ -77,17 +89,20 @@ SUBSCRIBE: dict[str, dict[str, str]] = {
         "/config_url":        "std_msgs/msg/String",
         "/phone/config":      "std_msgs/msg/String",
         "/phone/config_url":  "std_msgs/msg/String",
+        "/brain/info":        "std_msgs/msg/String",   # the brain's protocol / version
     },
     "app": {
         "/expression":        "std_msgs/msg/String",
         "/look_at":           "geometry_msgs/msg/PoseStamped",
         "/speech/say":        "std_msgs/msg/String",
         "/webrtc/answer":     "std_msgs/msg/String",
+        "/brain/info":        "std_msgs/msg/String",
     },
     "esp32": {
         "/cmd_vel":           "geometry_msgs/msg/Twist",
         "/servo/command":     "trajectory_msgs/msg/JointTrajectory",
         "/ping":              "std_msgs/msg/String",
+        "/brain/info":        "std_msgs/msg/String",
     },
 }
 

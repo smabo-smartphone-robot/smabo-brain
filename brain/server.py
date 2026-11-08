@@ -2,6 +2,8 @@
 
 接続口は ``ws://<host>:9090/`` の1つだけで、smabo-brain-ros（rosbridge）と同じ
 手順でつなぐ。どのクライアントかは最初のフレームで判別する（clients.py）。
+つないだクライアントには /brain/info を送り、クライアントの /hello で
+プロトコル番号を確かめる（hello.py）。
 
 振り分け（送り主の名前 /web /app /esp32 を外して配信）:
   web   → /speech/say, /expression, /look_at は app へ。/vision/config と
@@ -23,7 +25,7 @@ import logging
 import aiohttp
 from aiohttp import web
 
-from . import frames
+from . import frames, hello
 from .clients import HOUSEKEEPING_OPS, Clients, role_of_frame
 from .odometry import Odometry
 from .speech import Speech
@@ -39,6 +41,8 @@ class Brain:
                  vision_config_path: str | None = None,
                  stt_config: dict | None = None) -> None:
         self.clients = Clients()
+        # /hello of each connected client (for the protocol check and new webs)
+        self.hellos: dict[web.WebSocketResponse, tuple[str, dict]] = {}
         self.odom = Odometry()
         self.vision = VisionPipeline(self.clients.send, vision_config, vision_config_path)
         self.speech = Speech(self.clients.send, stt_config)
@@ -67,19 +71,43 @@ class Brain:
     async def _join(self, ws: web.WebSocketResponse, role: str) -> None:
         self.clients.add(ws, role)
         if role != "web":
+            await self._send(ws, hello.info_frame())
             await self.clients.notify_web(role, "connected")
             return
         # web には現在の画像処理設定と接続状況を送り、起動直後から正しく表示させる。
         # プレビュー映像は web が /webrtc/preview {on:true} を送ったときだけ流す。
+        await self._send(ws, self.vision.config_frame())
+        await self._send(ws, hello.info_frame())
+        for text in self.clients.snapshot_notices():
+            await self._send(ws, text)
+        for r, h in self.hellos.values():
+            if r != "web":
+                await self._send(ws, hello.notice(r, h))
+
+    @staticmethod
+    async def _send(ws: web.WebSocketResponse, text: str) -> None:
         try:
-            await ws.send_str(self.vision.config_frame())
-            for text in self.clients.snapshot_notices():
-                await ws.send_str(text)
+            await ws.send_str(text)
         except Exception:
             pass
 
+    async def _on_hello(self, ws: web.WebSocketResponse, role: str, frame: dict) -> None:
+        """A client's /hello: remember it, answer with /brain/info, warn on a mismatch."""
+        h = hello.parse(frame)
+        self.hellos[ws] = (role, h)
+        if hello.compatible(h):
+            log.info("%s hello: %s %s (protocol %s)", role, h["client"], h["version"], h["protocol"])
+        else:
+            log.warning("%s (%s %s) はプロトコル %s です。brain は %s なので、"
+                        "一部の機能が正しく動かない可能性があります",
+                        role, h["client"], h["version"], h["protocol"], hello.info()["protocol"])
+        await self._send(ws, hello.info_frame())
+        if role != "web":
+            await self.clients.send("web", hello.notice(role, h))
+
     async def _leave(self, ws: web.WebSocketResponse, role: str) -> None:
         self.clients.remove(ws, role)
+        self.hellos.pop(ws, None)
         if role == "web":
             await self.hub.stop_web_preview(ws)
             return
@@ -129,7 +157,9 @@ class Brain:
         if not isinstance(topic, str):
             return
         frame["topic"] = strip_prefix(topic, SOURCE_PREFIXES[role])
-        if role == "web":
+        if frame["topic"] == "/hello":
+            await self._on_hello(ws, role, frame)
+        elif role == "web":
             await self._from_web(ws, frame)
         elif role == "app":
             await self._from_app(frame)

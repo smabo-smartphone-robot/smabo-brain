@@ -21,6 +21,12 @@ smabo-brain-ros（rosbridge）と同じ手順でつなぎます。クライア�
 1. `/` に接続する
 2. publish するトピックを `advertise`、受け取るトピックを `subscribe` する
 3. 送信元 prefix（下記）を付けて `publish` する
+4. `/hello` を 1 回 publish する（`{"protocol": 1, "client": "smabo-web", "version": "0.1.0"}`）
+
+brain は `/brain/info`（`{"protocol", "brain", "version"}`）で答えます。プロトコル番号
+（`brain/topics.py` の `PROTOCOL_VERSION`）が違うと、brain のログと smabo-web の画面に
+警告が出ます。クライアントも `/brain/info` を見て、自分の側で警告します。トピック名を
+変える・消す、メッセージの型や意味を変えるときは、番号を 1 つ上げてください。
 
 brain は最初に届いたフレーム（prefix 付きの advertise / publish、または特定の
 クライアントだけが受け取るトピックの subscribe）から、相手が web / app / esp32 の
