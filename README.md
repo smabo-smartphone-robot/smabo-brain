@@ -30,7 +30,9 @@ brain は `/brain/info`（`{"protocol", "brain", "version"}`）で答えます�
 
 brain は最初に届いたフレーム（prefix 付きの advertise / publish、または特定の
 クライアントだけが受け取るトピックの subscribe）から、相手が web / app / esp32 の
-どれかを判別します。誰が何を送受信するかの表は `brain/topics.py` にあります。
+どれかを判別します。誰が何を送受信するかの表の正本は smabo-protocol の `protocol.json`
+で、全トピックの一覧は smabo-protocol の `TOPICS.md` にあります。brain は生成された
+`brain/protocol_gen.py` を `brain/topics.py` から読みます。
 
 | 接続元 | おもな送信 | おもな受信 |
 |--------|-----------|-----------|
