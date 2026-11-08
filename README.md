@@ -120,6 +120,17 @@ HTTP API（smabo-web 用。`Authorization: Bearer <ブラウザの token>` が�
 | `DELETE /pairings/{id}` | ペアリングを外す |
 | `* /devices/{esp32 \| app}/{path}` | 機器の REST へ転送（機器が未接続なら 504、鍵を断られたら 502） |
 
+## 操作権（1 つのブラウザだけが動かす）
+
+smabo-web のタブが複数開いていても、走行（`/cmd_vel`）とアーム（`/servo/command`）を送れるのは 1 つのタブだけです（`brain/control.py`）。
+
+- 誰も操作していないとき、最初に走行・アームの指令を送ったタブが操作権を取る
+- ほかのタブの指令は捨てる。そのタブには「○○が操作中」と「操作を引き継ぐ」（`{"op": "control", "action": "claim"}`）を出す
+- 操作中のタブは `{"op": "control", "action": "release"}` で手放す。タブを閉じる・切れたときも手放す
+- 操作権が別のタブへ移る・手放されると、brain は ESP32 に止まる指令（速度 0 の `/cmd_vel`）を送る
+- 誰が操作中かは `{"op": "notice", "event": "control", "holder": 名前 or null, "you": bool}` で全タブに知らせる（接続時にも 1 回）。名前はペアリング名（`--no-auth` では `browser 1` など）
+- `/brain/info` の `control: true` で web はこの仕組みがあると分かる（smabo-brain-ros にはないので、web は従来どおり動く）
+
 ## 起動
 
 ```bash

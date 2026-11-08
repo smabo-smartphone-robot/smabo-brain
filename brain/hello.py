@@ -23,8 +23,10 @@ def info(auth: bool = False) -> dict:
 
     ``auth`` tells smabo-web whether clients pair (and settings go through the
     brain's /devices relay) or not (``--no-auth``: settings go to the devices).
+    ``control`` says that one browser at a time drives (control.py).
     """
-    return {"protocol": PROTOCOL_VERSION, "brain": BRAIN_NAME, "version": __version__, "auth": auth}
+    return {"protocol": PROTOCOL_VERSION, "brain": BRAIN_NAME, "version": __version__, "auth": auth,
+            "control": True}
 
 
 def info_frame(auth: bool = False) -> str:

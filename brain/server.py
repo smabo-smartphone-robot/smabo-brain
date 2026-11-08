@@ -33,6 +33,7 @@ from aiohttp import web
 
 from . import frames, hello
 from .clients import HOUSEKEEPING_OPS, Clients, role_of_frame
+from .control import CONTROL_TOPICS, Control
 from .gateway import Gateway, cors_middleware
 from .odometry import Odometry
 from .pairing import Pairing, PairingError, Pairings
@@ -62,6 +63,10 @@ class Brain:
         self.device_urls: dict[str, tuple[str, web.WebSocketResponse]] = {}
         # /hello of each connected client (for the protocol check and new webs)
         self.hellos: dict[web.WebSocketResponse, tuple[str, dict]] = {}
+        # Which browser drives (control.py); names for browsers without a pairing
+        self.control = Control()
+        self.web_names: dict[web.WebSocketResponse, str] = {}
+        self._web_count = 0
         self.odom = Odometry()
         self.vision = VisionPipeline(self.clients.send, vision_config, vision_config_path)
         self.speech = Speech(self.clients.send, stt_config)
@@ -172,8 +177,12 @@ class Brain:
             return
         # web には現在の画像処理設定と接続状況を送り、起動直後から正しく表示させる。
         # プレビュー映像は web が /webrtc/preview {on:true} を送ったときだけ流す。
+        self._web_count += 1
+        pairing = self.conn_pairing.get(ws)
+        self.web_names[ws] = pairing.name if pairing else f"browser {self._web_count}"
         await self._send(ws, self.vision.config_frame())
         await self._send(ws, self._info_frame())
+        await self._send(ws, self.control.notice(ws))
         for text in self.clients.snapshot_notices():
             await self._send(ws, text)
         for r, h in self.hellos.values():
@@ -209,6 +218,9 @@ class Brain:
             del self.device_urls[role]
         if role == "web":
             await self.hub.stop_web_preview(ws)
+            self.web_names.pop(ws, None)
+            if self.control.release(ws):
+                await self._control_changed()
             return
         if role == "app" and not self.clients.count("app"):
             await self.hub.close_app()   # 映像源が切れたら WebRTC を畳む
@@ -252,6 +264,10 @@ class Brain:
                     await self._join(ws, role)
                 if frame.get("op") in HOUSEKEEPING_OPS:
                     continue
+                if frame.get("op") == "control":
+                    if role == "web":
+                        await self._on_control(ws, frame)
+                    continue
                 await self._dispatch(ws, role, frame)
         finally:
             if role is not None:
@@ -286,9 +302,40 @@ class Brain:
         else:
             await self._from_esp32(frame)
 
+    # ── 操作権（control.py） ─────────────────────────────────────────────
+    async def _on_control(self, ws: web.WebSocketResponse, frame: dict) -> None:
+        action = frame.get("action")
+        name = self.web_names.get(ws, "browser")
+        had_holder = self.control.holder is not None
+        if action == "claim":
+            changed = self.control.claim(ws, name)
+        elif action == "release":
+            changed = self.control.release(ws)
+        else:
+            return
+        if changed:
+            log.info("control: %s", f"{name} drives" if action == "claim" else f"{name} let go")
+            await self._control_changed(stop=had_holder)
+        else:
+            await self._send(ws, self.control.notice(ws))
+
+    async def _control_changed(self, stop: bool = True) -> None:
+        """The holder changed: stop the robot (when someone was driving), and tell every browser."""
+        if stop:
+            await self.clients.send("esp32", frames.pub("/cmd_vel", {
+                "linear": {"x": 0.0, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": 0.0}}))
+        for ws in list(self.web_names):
+            await self._send(ws, self.control.notice(ws))
+
     # ── 役割ごとの処理（frame["topic"] は送り主の名前を外した正式名） ─────────
     async def _from_web(self, ws: web.WebSocketResponse, frame: dict) -> None:
         topic = frame["topic"]
+        if topic in CONTROL_TOPICS:
+            allowed, changed = self.control.allow(ws, self.web_names.get(ws, "browser"))
+            if changed:
+                await self._control_changed(stop=False)     # nobody was driving
+            if not allowed:
+                return      # another browser drives (control.py)
         if topic == "/vision/config":
             self.vision.apply_config(frame.get("msg") or {})
             self.hub.set_fps(self.vision.config.capture_fps)
