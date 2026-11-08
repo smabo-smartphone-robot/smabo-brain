@@ -13,9 +13,15 @@
   esp32 → /wheel_vel は積分して /odom を web へ。/config は brain も受け取り
           （オドメトリ用）、変更の知らせとして web へも流す。それ以外は web へ。
 
-設定はどの機器も REST で直接読み書きする（ESP32 は :80、スマホは :8081 の
-GET/POST /config）。brain は場所（/config_url, /phone/config_url）と変更の知らせ
-（/config, /phone/config）を web へ中継するだけ。
+設定は機器の REST（ESP32 は :80、スマホは :8081 の GET/POST /config）にある。
+web は brain の /devices/{esp32,app}/… に送り、brain が機器へ転送する（gateway.py）。
+brain は場所（/config_url, /phone/config_url）を覚え、変更の知らせ
+（/config, /phone/config）を web へ中継する。
+
+認証（pairing.py）: つないだら最初のフレームで token を見せる（{"op":"auth"}）か、
+招待コードでペアリングする（{"op":"pair"}）。役割は token の控えで決まり、
+接頭辞の違うトピックは捨てる。--no-auth（pairings=None）のときは従来どおり、
+最初のフレームの接頭辞で役割を判別し、web は機器の REST へ直接つなぐ。
 """
 
 import asyncio
@@ -27,7 +33,9 @@ from aiohttp import web
 
 from . import frames, hello
 from .clients import HOUSEKEEPING_OPS, Clients, role_of_frame
+from .gateway import Gateway, cors_middleware
 from .odometry import Odometry
+from .pairing import Pairing, PairingError, Pairings
 from .speech import Speech
 from .topics import APP_TOPICS, ROS_ONLY_TOPICS, SOURCE_PREFIXES, strip_prefix
 from .vision_pipeline import VisionPipeline
@@ -35,12 +43,23 @@ from .webrtc_hub import WebRtcHub
 
 log = logging.getLogger(__name__)
 
+AUTH_TIMEOUT_S = 5
+CLOSE_UNAUTHORIZED = 4001
+# Topics a device publishes to say where its REST API is (kept for the relay)
+_URL_TOPICS = {"esp32": "/config_url", "app": "/phone/config_url"}
+
 
 class Brain:
     def __init__(self, vision_config: dict | None = None,
                  vision_config_path: str | None = None,
-                 stt_config: dict | None = None) -> None:
+                 stt_config: dict | None = None,
+                 pairings: Pairings | None = None) -> None:
         self.clients = Clients()
+        # None = --no-auth. Otherwise every connection shows a token first.
+        self.pairings = pairings
+        self.conn_pairing: dict[web.WebSocketResponse, Pairing] = {}
+        # Where each device's REST API is: role → (url, connection that announced it)
+        self.device_urls: dict[str, tuple[str, web.WebSocketResponse]] = {}
         # /hello of each connected client (for the protocol check and new webs)
         self.hellos: dict[web.WebSocketResponse, tuple[str, dict]] = {}
         self.odom = Odometry()
@@ -57,6 +76,80 @@ class Brain:
             log.warning("aiortc が無いため WebRTC カメラ/vision は無効です。"
                         "pip install -r requirements.txt を実行してください。")
 
+    def _info_frame(self) -> str:
+        return hello.info_frame(auth=self.pairings is not None)
+
+    # ── pairing and the device relay ──────────────────────────────────
+    def online_pairing_ids(self) -> set[str]:
+        return {p.id for p in self.conn_pairing.values()}
+
+    async def disconnect_pairing(self, pairing_id: str) -> None:
+        """Close the connections of a pairing that was just removed."""
+        for ws, p in list(self.conn_pairing.items()):
+            if p.id == pairing_id:
+                await ws.close(code=CLOSE_UNAUTHORIZED, message=b"unpaired")
+
+    def device_target(self, role: str) -> tuple[str, str] | None:
+        """(REST base URL, relay key) of the connected device of ``role``, or None."""
+        entry = self.device_urls.get(role)
+        if entry is None:
+            return None
+        url, ws = entry
+        if ws.closed:
+            return None
+        p = self.conn_pairing.get(ws)
+        return url, p.relay_key if p else ""
+
+    async def _refuse(self, ws: web.WebSocketResponse, op: str, reason: str, message: str) -> None:
+        await self._send(ws, json.dumps({"op": op, "ok": False, "reason": reason, "message": message}))
+        await ws.close(code=CLOSE_UNAUTHORIZED, message=reason.encode()[:120])
+
+    async def _authenticate(self, ws: web.WebSocketResponse, remote: str | None) -> Pairing | None:
+        """Read the first frame: a token ("auth") or an invite code ("pair")."""
+        assert self.pairings is not None
+        try:
+            msg = await ws.receive(timeout=AUTH_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.warning("%s sent nothing; an old client without pairing?", remote)
+            await self._refuse(ws, "auth", "timeout", "Send a token or an invite code first")
+            return None
+        if msg.type != aiohttp.WSMsgType.TEXT:
+            return None
+        try:
+            frame = json.loads(msg.data)
+        except ValueError:
+            frame = None
+        op = frame.get("op") if isinstance(frame, dict) else None
+        if op == "auth":
+            p = self.pairings.check(frame.get("token"))
+            if p is None:
+                log.warning("%s showed an unknown token; it needs to pair again", remote)
+                await self._refuse(ws, "auth", "unauthorized", "Unknown token. Pair again")
+                return None
+            self.pairings.seen(p)
+            await self._send(ws, json.dumps({"op": "auth", "ok": True, "role": p.role,
+                                             "name": p.name, "id": p.id}))
+            return p
+        if op == "pair":
+            role = frame.get("role")
+            try:
+                done = self.pairings.pair(str(frame.get("code", "")), name=str(frame.get("name") or ""),
+                                          role=role if isinstance(role, str) else None)
+            except PairingError as e:
+                log.warning("%s: pairing refused (%s)", remote, e.reason)
+                await self._refuse(ws, "pair", e.reason, str(e))
+                return None
+            p = done.pairing
+            self.pairings.seen(p)
+            await self._send(ws, json.dumps({"op": "pair", "ok": True, "role": p.role, "name": p.name,
+                                             "id": p.id, "token": done.token, "relay_key": done.relay_key}))
+            await self.clients.send("web", json.dumps(
+                {"op": "notice", "event": "paired", "source": p.role, "name": p.name, "id": p.id}))
+            return p
+        log.warning("%s did not authenticate (first op %r); is it paired?", remote, op)
+        await self._refuse(ws, "auth", "unauthorized", "This brain needs pairing. Send a token first")
+        return None
+
     async def _hub_send_app(self, msg: dict) -> None:
         await self.clients.send("app", json.dumps(msg))
 
@@ -71,13 +164,13 @@ class Brain:
     async def _join(self, ws: web.WebSocketResponse, role: str) -> None:
         self.clients.add(ws, role)
         if role != "web":
-            await self._send(ws, hello.info_frame())
+            await self._send(ws, self._info_frame())
             await self.clients.notify_web(role, "connected")
             return
         # web には現在の画像処理設定と接続状況を送り、起動直後から正しく表示させる。
         # プレビュー映像は web が /webrtc/preview {on:true} を送ったときだけ流す。
         await self._send(ws, self.vision.config_frame())
-        await self._send(ws, hello.info_frame())
+        await self._send(ws, self._info_frame())
         for text in self.clients.snapshot_notices():
             await self._send(ws, text)
         for r, h in self.hellos.values():
@@ -101,13 +194,16 @@ class Brain:
             log.warning("%s (%s %s) はプロトコル %s です。brain は %s なので、"
                         "一部の機能が正しく動かない可能性があります",
                         role, h["client"], h["version"], h["protocol"], hello.info()["protocol"])
-        await self._send(ws, hello.info_frame())
+        await self._send(ws, self._info_frame())
         if role != "web":
             await self.clients.send("web", hello.notice(role, h))
 
     async def _leave(self, ws: web.WebSocketResponse, role: str) -> None:
         self.clients.remove(ws, role)
         self.hellos.pop(ws, None)
+        self.conn_pairing.pop(ws, None)
+        if role in self.device_urls and self.device_urls[role][1] is ws:
+            del self.device_urls[role]
         if role == "web":
             await self.hub.stop_web_preview(ws)
             return
@@ -120,6 +216,13 @@ class Brain:
         ws = web.WebSocketResponse(heartbeat=5)
         await ws.prepare(request)
         role: str | None = None
+        if self.pairings is not None:
+            pairing = await self._authenticate(ws, request.remote)
+            if pairing is None:
+                return ws
+            self.conn_pairing[ws] = pairing
+            role = pairing.role
+            await self._join(ws, role)
         try:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.ERROR:
@@ -156,7 +259,16 @@ class Brain:
         topic = frame.get("topic")
         if not isinstance(topic, str):
             return
-        frame["topic"] = strip_prefix(topic, SOURCE_PREFIXES[role])
+        prefix = SOURCE_PREFIXES[role]
+        if self.pairings is not None and not topic.startswith(prefix + "/"):
+            # The token decides the role; a browser cannot speak as the ESP32
+            log.warning("%s %r published %s; dropped", role, self.conn_pairing[ws].name, topic)
+            return
+        frame["topic"] = strip_prefix(topic, prefix)
+        if frame["topic"] == _URL_TOPICS.get(role):
+            url = (frame.get("msg") or {}).get("data")
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                self.device_urls[role] = (url, ws)
         if frame["topic"] == "/hello":
             await self._on_hello(ws, role, frame)
         elif role == "web":
@@ -228,14 +340,35 @@ BRAIN_KEY = web.AppKey("brain", Brain)
 
 def create_app(vision_config: dict | None = None,
                vision_config_path: str | None = None,
-               stt_config: dict | None = None) -> web.Application:
+               stt_config: dict | None = None,
+               pairings: Pairings | None = None) -> web.Application:
     """smabo-brain の aiohttp アプリを作る。
 
     vision_config: 画像処理設定の起動時初期値（VisionConfig.to_dict() 形状）。
     None なら組み込み既定（mode=off）。stt_config: engine / model / language。
+    pairings: ペアリングの控え。None なら認証なし（--no-auth）。
     """
-    brain = Brain(vision_config, vision_config_path, stt_config)
-    app = web.Application()
+    brain = Brain(vision_config, vision_config_path, stt_config, pairings)
+    gateway = Gateway(brain)
+    app = web.Application(middlewares=[cors_middleware])
     app[BRAIN_KEY] = brain
     app.router.add_get("/", brain.handle_ws)
+    app.router.add_routes(gateway.routes())
+
+    async def close_gateway(_app: web.Application) -> None:
+        await gateway.close()
+    app.on_cleanup.append(close_gateway)
+
+    if pairings is not None:
+        async def bootstrap_codes(_app: web.Application):
+            # While no browser is paired, keep a fresh code in the log
+            # (each one lasts 5 minutes).
+            async def loop() -> None:
+                while True:
+                    pairings.ensure_bootstrap()
+                    await asyncio.sleep(15)
+            task = asyncio.create_task(loop())
+            yield
+            task.cancel()
+        app.cleanup_ctx.append(bootstrap_codes)
     return app

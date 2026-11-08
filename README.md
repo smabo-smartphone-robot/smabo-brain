@@ -18,19 +18,23 @@ smabo-app  ──►  smabo-brain  ◄──  smabo-web
 smabo-brain-ros（rosbridge）と同じ手順でつなぎます。クライアントは brain がどちらでも
 設定を変えずに動きます。
 
-1. `/` に接続する
+1. `/` に接続し、最初のフレームで token を見せる（`{"op": "auth", "token": "…"}`）か、
+   招待コードでペアリングする（`{"op": "pair", "code": "ABCD-EFGH", "name": "iPhone"}`）。
+   brain は `{"op": "auth" | "pair", "ok": true, "role", "name", "id"}` で答える
+   （ペアリングでは `token` と、機器には `relay_key` も付く）。下の「ペアリング」を参照
 2. publish するトピックを `advertise`、受け取るトピックを `subscribe` する
 3. 送信元 prefix（下記）を付けて `publish` する
 4. `/hello` を 1 回 publish する（`{"protocol": 1, "client": "smabo-web", "version": "0.1.0"}`）
 
-brain は `/brain/info`（`{"protocol", "brain", "version"}`）で答えます。プロトコル番号
+brain は `/brain/info`（`{"protocol", "brain", "version", "auth"}`）で答えます。プロトコル番号
 （`brain/topics.py` の `PROTOCOL_VERSION`）が違うと、brain のログと smabo-web の画面に
 警告が出ます。クライアントも `/brain/info` を見て、自分の側で警告します。トピック名を
 変える・消す、メッセージの型や意味を変えるときは、番号を 1 つ上げてください。
 
-brain は最初に届いたフレーム（prefix 付きの advertise / publish、または特定の
-クライアントだけが受け取るトピックの subscribe）から、相手が web / app / esp32 の
-どれかを判別します。誰が何を送受信するかの表の正本は smabo-protocol の `protocol.json`
+相手が web / app / esp32 のどれかは、token の控えに記録された役割で決まります。
+役割と違う prefix のトピックは捨てます（ブラウザが ESP32 になりすませない）。
+`--no-auth` のときだけ、従来どおり最初に届いたフレーム（prefix 付きの advertise /
+publish、または特定のクライアントだけが受け取るトピックの subscribe）から判別します。誰が何を送受信するかの表の正本は smabo-protocol の `protocol.json`
 で、全トピックの一覧は smabo-protocol の `TOPICS.md` にあります。brain は生成された
 `brain/protocol_gen.py` を `brain/topics.py` から読みます。
 
@@ -86,6 +90,36 @@ smabo-brain-ros では、同じ表（`brain/topics.py`）から topic_tools rela
 - **音声認識**: smabo-app の録音（`/speech/audio`、base64 WAV）を STT（vosk / faster-whisper、
   `brain/stt.py`）にかけ、`/speech/recognized` を web へ送出します。
 
+## ペアリング
+
+brain は、ペアリングしたクライアントだけを受け付けます（`brain/pairing.py`）。
+
+| 何を | どうやって |
+|------|-----------|
+| 最初のブラウザ | brain のログに出るコード（`最初のブラウザ用のペアリングコード: ABCD-EFGH`）を smabo-web に入力する。5 分ごとに新しいコードが出る |
+| 2 台目以降のブラウザ・スマホ・ESP32 | ペアリング済みの smabo-web の「Devices」で招待コードを出し、その機器に入力する（5 分間・1 回だけ有効） |
+| 外す | smabo-web の「Devices」で Remove。その機器の接続はすぐ切れる。最後のブラウザは外せない |
+| 全部やり直す | `python3 -m brain --reset-pairing`（brain を動かす PC を触れる人だけができる） |
+
+- brain は token そのものを持たず、SHA-256 のハッシュだけを `~/.smabo/brain/pairings.json`
+  （`--pairings` で変更）に保存します。ファイルは本人だけが読める権限で書きます。
+- 間違ったコードが 5 回続くと、出ているコードをすべて無効にします。
+- スマホと ESP32 はペアリングのときに **中継用の鍵**（relay key）を受け取り、ハッシュだけを保存します。
+  smabo-web の設定は brain の `/devices/esp32/…`・`/devices/app/…` に送られ、brain がこの鍵を
+  `X-Smabo-Relay-Key` ヘッダーに付けて機器の REST へ転送します。ペアリング済みの機器は、
+  この鍵のない要求を断り、ブラウザ向けの CORS も返しません。
+- `--no-auth`（または `SMABO_NO_AUTH=1`）で従来の動き（誰でも接続でき、web は機器へ直接つなぐ）に戻せます。開発用です。
+
+HTTP API（smabo-web 用。`Authorization: Bearer <ブラウザの token>` が必要）:
+
+| メソッドとパス | 内容 |
+|---------------|------|
+| `GET /pairings` | ペアリング済みの一覧（`online` 付き）と、自分の `id` |
+| `POST /invites` `{"role": "web" \| "app" \| "esp32", "name"?}` | 招待コード |
+| `PATCH /pairings/{id}` `{"name"}` | 名前の変更 |
+| `DELETE /pairings/{id}` | ペアリングを外す |
+| `* /devices/{esp32 \| app}/{path}` | 機器の REST へ転送（機器が未接続なら 504、鍵を断られたら 502） |
+
 ## 起動
 
 ```bash
@@ -126,6 +160,8 @@ python3 -m brain --vision-config vision.json
 | `brain/__main__.py` | 起動オプション |
 | `brain/server.py` | WebSocket の受信と振り分け |
 | `brain/clients.py` | 接続中のクライアントと、その種類の判別 |
+| `brain/pairing.py` | ペアリングの控え・招待コード・token の照合 |
+| `brain/gateway.py` | smabo-web 用の HTTP API（ペアリングの管理、機器への設定の転送） |
 | `brain/frames.py` | rosbridge JSON の組み立て（publish・`/odom`・接続通知） |
 | `brain/vision_pipeline.py` | 画像処理の実行と状態（設定・PID） |
 | `brain/speech.py` | 録音の受け付けと音声認識 |

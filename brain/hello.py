@@ -18,14 +18,18 @@ from .topics import PROTOCOL_VERSION
 BRAIN_NAME = "smabo-brain"
 
 
-def info() -> dict:
-    """What the brain says about itself on ``/brain/info``."""
-    return {"protocol": PROTOCOL_VERSION, "brain": BRAIN_NAME, "version": __version__}
+def info(auth: bool = False) -> dict:
+    """What the brain says about itself on ``/brain/info``.
+
+    ``auth`` tells smabo-web whether clients pair (and settings go through the
+    brain's /devices relay) or not (``--no-auth``: settings go to the devices).
+    """
+    return {"protocol": PROTOCOL_VERSION, "brain": BRAIN_NAME, "version": __version__, "auth": auth}
 
 
-def info_frame() -> str:
+def info_frame(auth: bool = False) -> str:
     """``/brain/info`` publish frame (std_msgs/String, JSON in ``data``)."""
-    return frames.pub("/brain/info", {"data": json.dumps(info())})
+    return frames.pub("/brain/info", {"data": json.dumps(info(auth))})
 
 
 def parse(frame: dict) -> dict:

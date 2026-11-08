@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from aiohttp import web
+from .pairing import DEFAULT_PATH, Pairings
 from .server import create_app
 
 logging.basicConfig(
@@ -64,6 +65,22 @@ def main() -> None:
         default=os.environ.get("SMABO_STT_LANGUAGE", "ja"),
         help="音声認識の言語（既定: ja）。",
     )
+    parser.add_argument(
+        "--no-auth", action="store_true",
+        default=os.environ.get("SMABO_NO_AUTH", "") not in ("", "0"),
+        help="ペアリングなしで誰でもつなげる（従来の動き。開発用）。"
+             "web は機器の REST へ直接つなぐ。環境変数 SMABO_NO_AUTH=1 でも指定可。",
+    )
+    parser.add_argument(
+        "--pairings",
+        default=os.environ.get("SMABO_PAIRINGS", str(DEFAULT_PATH)),
+        metavar="PATH",
+        help=f"ペアリングの控え（token のハッシュ）の保存先（既定: {DEFAULT_PATH}）。",
+    )
+    parser.add_argument(
+        "--reset-pairing", action="store_true",
+        help="ペアリングをすべて消して、最初のブラウザ用のコードを出し直す。",
+    )
     args = parser.parse_args()
 
     vision_config = _load_vision_config(args.vision_config)
@@ -82,7 +99,23 @@ def main() -> None:
         print(f"  vision config : {vision_config_path} (not found, using defaults; will be created on first change)")
     print(f"  STT engine    : {args.stt_engine} (language={args.stt_language})")
 
-    app = create_app(vision_config=vision_config, vision_config_path=vision_config_path, stt_config=stt_config)
+    pairings = None
+    if args.no_auth:
+        print("  pairing       : OFF (--no-auth): anyone on the network can connect")
+    else:
+        def announce(code: str) -> None:
+            log.warning("最初のブラウザ用のペアリングコード: %s （5 分間・1 回だけ有効）", code)
+            log.warning("smabo-web を開き、このコードを入力してください")
+        pairings = Pairings.load(args.pairings, on_bootstrap=announce)
+        if args.reset_pairing:
+            pairings.reset()
+            print("  pairing       : reset (every client must pair again)")
+        n = {r: sum(1 for e in pairings.entries if e.role == r) for r in ("web", "app", "esp32")}
+        print(f"  pairing       : {args.pairings} "
+              f"({n['web']} browser, {n['app']} phone, {n['esp32']} ESP32)")
+
+    app = create_app(vision_config=vision_config, vision_config_path=vision_config_path,
+                     stt_config=stt_config, pairings=pairings)
     web.run_app(app, host=args.host, port=args.port, print=None)
 
 
