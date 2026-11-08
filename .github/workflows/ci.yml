@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the other smabo repositories next to this one
+        # Same branch name when it exists, otherwise the default branch.
+        # A repository that cannot be cloned is skipped by the tests.
+        run: |
+          cd ..
+          branch="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          for r in smabo-protocol smabo-web smabo-app smabo-esp32 smabo-sim smabo-brain-ros; do
+            git clone -q --depth 1 --branch "$branch" "https://github.com/smabo-smartphone-robot/$r.git" 2>/dev/null \
+              || git clone -q --depth 1 "https://github.com/smabo-smartphone-robot/$r.git" 2>/dev/null \
+              || echo "::warning::$r could not be cloned; its checks are skipped"
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - name: Tests (brain, and the protocol copies in the other repositories)
+        run: python -m pytest -q tests
