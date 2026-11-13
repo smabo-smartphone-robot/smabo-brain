@@ -4,7 +4,7 @@ Pure, transport-agnostic integrator: it knows nothing about WebSockets, ROS,
 time sources, or message formats.  ``integrate()`` returns plain pose/twist
 values so each transport can build its own message:
 
-  - smabo-brain (WebSocket)  → rosbridge JSON, wall-clock stamp (relay.py)
+  - smabo-brain (WebSocket)  → rosbridge JSON, wall-clock stamp (frames.py)
   - smabo-brain-ros (rclpy)  → nav_msgs/Odometry + tf, ROS-clock stamp
 
 Keeping time/format out of here is what lets brain-ros wrap brain by simply
@@ -81,7 +81,7 @@ class Odometry:
                  "cov", "odom_frame", "base_frame"}
 
             or None if dt <= 0.  Time-stamping and message building are left to
-            the transport layer (see relay.py for the WebSocket version).
+            the transport layer (see frames.py for the WebSocket version).
         """
         if dt <= 0:
             return None

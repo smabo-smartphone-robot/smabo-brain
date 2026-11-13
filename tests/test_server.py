@@ -1,0 +1,243 @@
+"""smabo-brain の振り分け: 全クライアントが "/" につなぎ、役割はフレームから判別する。"""
+
+import asyncio
+import json
+
+from aiohttp.test_utils import TestClient, TestServer
+
+from brain.server import BRAIN_KEY, create_app
+
+TWIST = {"linear": {"x": 0.2, "y": 0, "z": 0}, "angular": {"x": 0, "y": 0, "z": 0}}
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+async def _client():
+    client = TestClient(TestServer(create_app(stt_config={"engine": "vosk", "model": "/nonexistent"})))
+    await client.start_server()
+    return client
+
+
+async def _recv_all(ws, timeout=0.3):
+    out = []
+    while True:
+        try:
+            m = await ws.receive(timeout=timeout)
+        except asyncio.TimeoutError:
+            return out
+        if m.type.name != "TEXT":
+            return out
+        out.append(json.loads(m.data))
+
+
+async def _connect_esp32(client):
+    ws = await client.ws_connect("/")
+    await ws.send_json({"op": "advertise", "topic": "/esp32/wheel_vel", "type": "smabo_interfaces/msg/WheelVel"})
+    await ws.send_json({"op": "subscribe", "topic": "/cmd_vel", "type": "geometry_msgs/msg/Twist"})
+    return ws
+
+
+async def _connect_web(client):
+    ws = await client.ws_connect("/")
+    await ws.send_json({"op": "advertise", "topic": "/web/cmd_vel", "type": "geometry_msgs/msg/Twist"})
+    return ws
+
+
+async def _connect_app(client):
+    ws = await client.ws_connect("/")
+    await ws.send_json({"op": "subscribe", "topic": "/expression", "type": "std_msgs/msg/String"})
+    return ws
+
+
+def test_only_root_path_is_served():
+    async def go():
+        client = await _client()
+        try:
+            for path in ("/ui", "/esp32"):
+                resp = await client.get(path)
+                assert resp.status == 404
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_web_drive_command_reaches_esp32_without_prefix():
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await web.send_json({"op": "publish", "topic": "/web/cmd_vel", "msg": TWIST})
+            got = await _recv_all(esp)
+            assert {"op": "publish", "topic": "/cmd_vel", "msg": TWIST} in got
+            # housekeeping ops from the web are not relayed to the ESP32
+            assert all(f["op"] == "publish" for f in got)
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_web_gets_snapshot_and_connection_notices():
+    async def go():
+        client = await _client()
+        try:
+            await _connect_esp32(client)
+            await asyncio.sleep(0.05)
+            web = await _connect_web(client)
+            first = await _recv_all(web)
+            assert first[0]["topic"] == "/vision/config"
+            assert {"op": "notice", "source": "esp32", "event": "connected", "total": 1} in first
+            app = await _connect_app(client)
+            await asyncio.sleep(0.05)
+            await app.close()
+            notices = [(f["source"], f["event"]) for f in await _recv_all(web) if f["op"] == "notice"]
+            assert notices == [("app", "connected"), ("app", "disconnected")]
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_app_topics_go_to_app_not_esp32():
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            app = await _connect_app(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await web.send_json({"op": "publish", "topic": "/web/expression", "msg": {"data": "Angry"}})
+            assert {"op": "publish", "topic": "/expression", "msg": {"data": "Angry"}} in await _recv_all(app)
+            assert not [f for f in await _recv_all(esp) if f.get("topic") == "/expression"]
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_esp32_config_sets_odometry_reaches_web_and_wheel_vel_becomes_odom():
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await _recv_all(web)
+            cfg = {"dc": {"wheel_separation": 0.5}, "servos": {"joints": {"head_pan": {}}}}
+            await esp.send_json({"op": "publish", "topic": "/esp32/config", "msg": {"data": json.dumps(cfg)}})
+            # turning in place: wz = (right - left) / separation = 0.2 / 0.5
+            await esp.send_json({"op": "publish", "topic": "/esp32/wheel_vel",
+                                 "msg": {"left": -0.1, "right": 0.1, "dt": 0.1}})
+            got = await _recv_all(web)
+            # web hears that the config changed (it re-reads it over REST)
+            assert [f for f in got if f.get("topic") == "/config"]
+            odom = [f for f in got if f.get("topic") == "/odom"]
+            assert odom and abs(odom[-1]["msg"]["twist"]["twist"]["angular"]["z"] - 0.4) < 1e-6
+            assert client.app[BRAIN_KEY].vision.joints == {"head_pan"}
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_frames_before_the_role_is_known_are_ignored():
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            stranger = await client.ws_connect("/")
+            await stranger.send_json({"op": "call_service", "service": "/rosapi/topics"})
+            await stranger.send_json({"op": "publish", "topic": "/cmd_vel", "msg": TWIST})
+            assert not [f for f in await _recv_all(esp)
+                        if f.get("op") == "publish" and f.get("topic") != "/brain/info"]
+            assert client.app[BRAIN_KEY].clients.count("web") == 0
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_navigation_topics_are_not_forwarded():
+    """/initialpose, /goal_pose and /nav/command are for smabo-brain-ros only."""
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await web.send_json({"op": "publish", "topic": "/web/nav/command",
+                                 "msg": {"data": '{"op": "mapping"}'}})
+            await web.send_json({"op": "publish", "topic": "/web/cmd_vel", "msg": TWIST})
+            got = await _recv_all(esp)
+            assert [f["topic"] for f in got if f["op"] == "publish"] == ["/brain/info", "/cmd_vel"]
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_phone_config_notices_reach_web():
+    """The phone announces its REST URL and its settings; web gets both."""
+    async def go():
+        client = await _client()
+        try:
+            app = await _connect_app(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await _recv_all(web)
+            await app.send_json({"op": "publish", "topic": "/app/phone/config_url",
+                                 "msg": {"data": "http://192.168.1.20:8081"}})
+            await app.send_json({"op": "publish", "topic": "/app/phone/config",
+                                 "msg": {"data": json.dumps({"speech": {"tts": False}})}})
+            topics = [f.get("topic") for f in await _recv_all(web)]
+            assert "/phone/config_url" in topics and "/phone/config" in topics
+        finally:
+            await client.close()
+    run(go())
+
+
+def _info(frames):
+    return [json.loads(f["msg"]["data"]) for f in frames if f.get("topic") == "/brain/info"]
+
+
+def test_brain_info_on_join_and_hello_notice_to_web():
+    """Clients get /brain/info on connect; a /hello is answered and shown to web."""
+    async def go():
+        client = await _client()
+        try:
+            web = await _connect_web(client)
+            esp = await _connect_esp32(client)
+            info = _info(await _recv_all(esp))
+            assert info and info[0]["brain"] == "smabo-brain" and info[0]["protocol"] == 1
+            await _recv_all(web)
+            await esp.send_json({"op": "publish", "topic": "/esp32/hello", "msg": {"data": json.dumps(
+                {"protocol": 1, "client": "smabo-esp32", "version": "0.1.0"})}})
+            assert _info(await _recv_all(esp))           # answered
+            got = [f for f in await _recv_all(web) if f.get("event") == "hello"]
+            assert got == [{"op": "notice", "source": "esp32", "event": "hello",
+                            "client": "smabo-esp32", "version": "0.1.0",
+                            "protocol": 1, "expected": 1, "ok": True}]
+            # a web that connects later learns the ESP32's hello too
+            web2 = await _connect_web(client)
+            assert [f for f in await _recv_all(web2) if f.get("event") == "hello"] == got
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_protocol_mismatch_is_flagged_and_hello_is_not_relayed():
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            app = await _connect_app(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await _recv_all(web)
+            await _recv_all(esp)
+            await app.send_json({"op": "publish", "topic": "/app/hello", "msg": {"data": json.dumps(
+                {"protocol": 0, "client": "smabo-app", "version": "0.0.9"})}})
+            notes = [f for f in await _recv_all(web) if f.get("event") == "hello"]
+            assert notes[0]["ok"] is False and notes[0]["protocol"] == 0 and notes[0]["expected"] == 1
+            assert not [f for f in await _recv_all(esp) if f.get("topic") == "/hello"]
+        finally:
+            await client.close()
+    run(go())

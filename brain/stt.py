@@ -17,7 +17,7 @@ Both libraries are imported lazily, so the brain runs without them installed —
 STT just stays disabled (a warning is logged) and ``/speech/audio`` is ignored.
 
 ``transcribe`` takes the decoded PCM as an ``int16`` numpy array plus its sample
-rate, so the WAV parsing lives in one place (relay.py) and each backend only
+rate, so the WAV parsing lives in one place (wav_to_samples) and each backend only
 deals with samples.
 """
 
