@@ -20,21 +20,22 @@ smabo-brain-ros（rosbridge）と同じ手順でつなぎます。クライア�
 
 1. `/` に接続し、最初のフレームで token を見せる（`{"op": "auth", "token": "…"}`）か、
    招待コードでペアリングする（`{"op": "pair", "code": "ABCD-EFGH", "name": "iPhone"}`）。
-   brain は `{"op": "auth" | "pair", "ok": true, "role", "name", "id"}` で答える
-   （ペアリングでは `token` と、機器には `relay_key` も付く）。下の「ペアリング」を参照
+   ペアリングなし（既定）の brain は `{"op": "auth" | "pair", "auth": false, "reason": "no_auth"}`
+   ですぐ答え、そのまま受け付ける。`--pairing` の brain は `{"op": "auth" | "pair", "ok": true, "role", "name", "id"}`
+   で答える（ペアリングでは `token` と、機器には `relay_key` も付く）。下の「ペアリング」を参照
 2. publish するトピックを `advertise`、受け取るトピックを `subscribe` する
 3. 送信元 prefix（下記）を付けて `publish` する
 4. `/hello` を 1 回 publish する（`{"protocol": 1, "client": "smabo-web", "version": "0.1.0"}`）
 
-brain は `/brain/info`（`{"protocol", "brain", "version", "auth"}`）で答えます。プロトコル番号
+brain は `/brain/info`（`{"protocol", "brain", "version", "auth", "relay", "control"}`）で答えます。プロトコル番号
 （`brain/topics.py` の `PROTOCOL_VERSION`）が違うと、brain のログと smabo-web の画面に
 警告が出ます。クライアントも `/brain/info` を見て、自分の側で警告します。トピック名を
 変える・消す、メッセージの型や意味を変えるときは、番号を 1 つ上げてください。
 
-相手が web / app / esp32 のどれかは、token の控えに記録された役割で決まります。
-役割と違う prefix のトピックは捨てます（ブラウザが ESP32 になりすませない）。
-`--no-auth` のときだけ、従来どおり最初に届いたフレーム（prefix 付きの advertise /
-publish、または特定のクライアントだけが受け取るトピックの subscribe）から判別します。誰が何を送受信するかの表の正本は smabo-protocol の `protocol.json`
+相手が web / app / esp32 のどれかは、ペアリングなし（既定）のときは、最初に届いたフレーム（prefix 付きの advertise /
+publish、または特定のクライアントだけが受け取るトピックの subscribe）から判別します。
+`--pairing` のときは、token の控えに記録された役割で決まり、役割と違う prefix のトピックは
+捨てます（ブラウザが ESP32 になりすませない）。誰が何を送受信するかの表の正本は smabo-protocol の `protocol.json`
 で、全トピックの一覧は smabo-protocol の `TOPICS.md` にあります。brain は生成された
 `brain/protocol_gen.py` を `brain/topics.py` から読みます。
 
@@ -62,8 +63,11 @@ smabo のリポジトリは、同じ minor 番号（`0.2.x` など）どうし�
 番号を上げたら、この表に行を足してください。`tests/test_protocol.py` は、隣にチェックアウト
 されている各リポジトリのプロトコル番号とバージョンが、brain と合っているかを確かめます。
 
-設定（config / mode）は brain を経由しません。smabo-web は ESP32 の REST API
-（`http://<esp32>/config`・`/mode`）へ直接アクセスします。brain はオドメトリ積分に
+設定（config / mode）は、smabo-web が brain の `/devices/esp32/…`・`/devices/app/…` に送り、
+brain が ESP32・スマホの REST API（`http://<esp32>/config`・`/mode` など）へ転送します
+（`brain/gateway.py`。`/brain/info` の `relay: true` が目印）。転送先は、その機器が brain に
+つないでいる WebSocket の相手のアドレスです。機器が brain につながっていないときは
+`504 device_offline` を返します。brain はオドメトリ積分に
 必要な車輪ジオメトリ等のため、ESP32 が `/esp32/config`（std_msgs/String の data に JSON、
 Wi-Fi 設定は除く）で送ってくる config スナップショットを内部の同期にのみ使います。
 
@@ -92,14 +96,16 @@ smabo-brain-ros では、同じ表（`brain/topics.py`）から topic_tools rela
 
 ## ペアリング
 
-brain は、ペアリングしたクライアントだけを受け付けます（`brain/pairing.py`）。
+既定では、ペアリングはありません。同じネットワークにいれば、ブラウザ・スマホ・ESP32 のどれでもそのままつながります（教室や家庭の LAN で使う前提です）。設定の転送は、中継用の鍵を付けずに行います。
+
+`--pairing`（または `SMABO_PAIRING=1`）を付けて起動すると、ペアリングしたクライアントだけを受け付けます（`brain/pairing.py`）。
 
 | 何を | どうやって |
 |------|-----------|
 | 最初のブラウザ | brain のログに出るコード（`最初のブラウザ用のペアリングコード: ABCD-EFGH`）を smabo-web に入力する。5 分ごとに新しいコードが出る |
 | 2 台目以降のブラウザ・スマホ・ESP32 | ペアリング済みの smabo-web の「Devices」で招待コードを出し、その機器に入力する（5 分間・1 回だけ有効） |
 | 外す | smabo-web の「Devices」で Remove。その機器の接続はすぐ切れる。最後のブラウザは外せない |
-| 全部やり直す | `python3 -m brain --reset-pairing`（brain を動かす PC を触れる人だけができる） |
+| 全部やり直す | `python3 -m brain --pairing --reset-pairing`（brain を動かす PC を触れる人だけができる） |
 
 - brain は token そのものを持たず、SHA-256 のハッシュだけを `~/.smabo/brain/pairings.json`
   （`--pairings` で変更）に保存します。ファイルは本人だけが読める権限で書きます。
@@ -108,7 +114,7 @@ brain は、ペアリングしたクライアントだけを受け付けます�
   smabo-web の設定は brain の `/devices/esp32/…`・`/devices/app/…` に送られ、brain がこの鍵を
   `X-Smabo-Relay-Key` ヘッダーに付けて機器の REST へ転送します。ペアリング済みの機器は、
   この鍵のない要求を断り、ブラウザ向けの CORS も返しません。
-- `--no-auth`（または `SMABO_NO_AUTH=1`）で従来の動き（誰でも接続でき、web は機器へ直接つなぐ）に戻せます。開発用です。
+- ペアリング済みの機器を `--pairing` なしの brain につなぐと、token と中継用の鍵はそのまま持ったまま、REST を誰からでも受け付けます（brain が鍵なしで転送するため）。また `--pairing` の brain につなぐと、元どおり brain 以外を断ります。
 
 HTTP API（smabo-web 用。`Authorization: Bearer <ブラウザの token>` が必要）:
 
@@ -129,7 +135,7 @@ smabo-web のタブが複数開いていても、走行（`/cmd_vel`）とアー
 - ほかのタブの指令は捨てる。そのタブには「○○が操作中」と「操作を引き継ぐ」（`{"op": "control", "action": "claim"}`）を出す
 - 操作中のタブは `{"op": "control", "action": "release"}` で手放す。タブを閉じる・切れたときも手放す
 - 操作権が別のタブへ移る・手放されると、brain は ESP32 に止まる指令（速度 0 の `/cmd_vel`）を送る
-- 誰が操作中かは `{"op": "notice", "event": "control", "holder": 名前 or null, "you": bool}` で全タブに知らせる（接続時にも 1 回）。名前はペアリング名（`--no-auth` では `browser 1` など）
+- 誰が操作中かは `{"op": "notice", "event": "control", "holder": 名前 or null, "you": bool}` で全タブに知らせる（接続時にも 1 回）。名前は `browser 1` など（`--pairing` のときはペアリング名）
 - `/brain/info` の `control: true` で web はこの仕組みがあると分かる（smabo-brain-ros にはないので、web は従来どおり動く）
 
 ## 起動

@@ -66,10 +66,10 @@ def main() -> None:
         help="音声認識の言語（既定: ja）。",
     )
     parser.add_argument(
-        "--no-auth", action="store_true",
-        default=os.environ.get("SMABO_NO_AUTH", "") not in ("", "0"),
-        help="ペアリングなしで誰でもつなげる（従来の動き。開発用）。"
-             "web は機器の REST へ直接つなぐ。環境変数 SMABO_NO_AUTH=1 でも指定可。",
+        "--pairing", action="store_true",
+        default=os.environ.get("SMABO_PAIRING", "") not in ("", "0"),
+        help="ペアリングした機器だけを受け付ける（既定はペアリングなしで、同じネットワークの"
+             "誰でもつなげる）。環境変数 SMABO_PAIRING=1 でも指定可。",
     )
     parser.add_argument(
         "--pairings",
@@ -79,7 +79,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--reset-pairing", action="store_true",
-        help="ペアリングをすべて消して、最初のブラウザ用のコードを出し直す。",
+        help="ペアリングをすべて消す（--pairing のときは、最初のブラウザ用のコードを出し直す）。",
     )
     args = parser.parse_args()
 
@@ -100,8 +100,11 @@ def main() -> None:
     print(f"  STT engine    : {args.stt_engine} (language={args.stt_language})")
 
     pairings = None
-    if args.no_auth:
-        print("  pairing       : OFF (--no-auth): anyone on the network can connect")
+    if not args.pairing:
+        print("  pairing       : OFF: anyone on the network can connect (--pairing to require it)")
+        if args.reset_pairing:
+            Pairings.load(args.pairings).reset()
+            print(f"  pairing       : {args.pairings} reset")
     else:
         def announce(code: str) -> None:
             log.warning("最初のブラウザ用のペアリングコード: %s （5 分間・1 回だけ有効）", code)

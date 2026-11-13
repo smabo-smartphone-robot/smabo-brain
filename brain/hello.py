@@ -21,12 +21,13 @@ BRAIN_NAME = "smabo-brain"
 def info(auth: bool = False) -> dict:
     """What the brain says about itself on ``/brain/info``.
 
-    ``auth`` tells smabo-web whether clients pair (and settings go through the
-    brain's /devices relay) or not (``--no-auth``: settings go to the devices).
+    ``auth`` tells smabo-web whether clients pair (``--pairing``) or not (the default).
+    ``relay`` says that the devices' settings go through the brain's /devices
+    relay (gateway.py), with or without pairing.
     ``control`` says that one browser at a time drives (control.py).
     """
     return {"protocol": PROTOCOL_VERSION, "brain": BRAIN_NAME, "version": __version__, "auth": auth,
-            "control": True}
+            "relay": True, "control": True}
 
 
 def info_frame(auth: bool = False) -> str:

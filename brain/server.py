@@ -20,7 +20,7 @@ brain は場所（/config_url, /phone/config_url）を覚え、変更の知ら�
 
 認証（pairing.py）: つないだら最初のフレームで token を見せる（{"op":"auth"}）か、
 招待コードでペアリングする（{"op":"pair"}）。役割は token の控えで決まり、
-接頭辞の違うトピックは捨てる。--no-auth（pairings=None）のときは従来どおり、
+接頭辞の違うトピックは捨てる。ペアリングなし（既定。pairings=None）のときは従来どおり、
 最初のフレームの接頭辞で役割を判別し、web は機器の REST へ直接つなぐ。
 """
 
@@ -56,7 +56,7 @@ class Brain:
                  stt_config: dict | None = None,
                  pairings: Pairings | None = None) -> None:
         self.clients = Clients()
-        # None = --no-auth. Otherwise every connection shows a token first.
+        # None = no pairing (the default; --pairing turns it on). Otherwise every connection shows a token first.
         self.pairings = pairings
         self.conn_pairing: dict[web.WebSocketResponse, Pairing] = {}
         # Where each device's REST API is: role → (url, connection that announced it)
@@ -252,7 +252,7 @@ class Brain:
                 if not isinstance(frame, dict):
                     continue
                 if role is None and frame.get("op") in ("auth", "pair"):
-                    # --no-auth: say so at once, so a client need not wait for a reply
+                    # no pairing: say so at once, so a client need not wait for a reply
                     await self._send(ws, json.dumps({"op": frame["op"], "ok": frame["op"] == "auth",
                                                      "auth": False, "reason": "no_auth"}))
                     continue
@@ -401,7 +401,7 @@ def create_app(vision_config: dict | None = None,
 
     vision_config: 画像処理設定の起動時初期値（VisionConfig.to_dict() 形状）。
     None なら組み込み既定（mode=off）。stt_config: engine / model / language。
-    pairings: ペアリングの控え。None なら認証なし（--no-auth）。
+    pairings: ペアリングの控え。None なら認証なし（既定。--pairing で有効）。
     """
     brain = Brain(vision_config, vision_config_path, stt_config, pairings)
     gateway = Gateway(brain)

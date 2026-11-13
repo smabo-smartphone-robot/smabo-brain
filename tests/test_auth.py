@@ -205,6 +205,8 @@ def test_no_auth_mode_relays_without_a_key(tmp_path):
             assert (await ws.receive_json(timeout=2))["ok"] is True
             await ws.close()
             assert (await client.get("/devices/esp32/config")).status == 504
+            from brain import hello
+            assert hello.info(auth=False)["relay"] is True
         finally:
             await client.close()
     run(go())

@@ -13,7 +13,7 @@ Endpoints (all but OPTIONS need ``Authorization: Bearer <browser token>``):
   DELETE /pairings/{id}              unpair (closes its connections)
   *      /devices/{app|esp32}/{path} forwarded to that device's REST API
 
-With ``--no-auth`` nothing needs a token, and the relay sends no key.
+Without ``--pairing`` (the default) nothing needs a token, and the relay sends no key.
 
 Browsers send the token as a header, never a cookie, so allowing any origin
 (CORS ``*``) lets no other site act with the user's rights.
@@ -105,7 +105,7 @@ class Gateway:
     def _need_pairings(self):
         if self.brain.pairings is None:
             raise web.HTTPNotFound(
-                text=json.dumps({"error": "no_auth", "message": "The brain runs with --no-auth"}),
+                text=json.dumps({"error": "no_auth", "message": "The brain runs without pairing (start it with --pairing)"}),
                 content_type="application/json")
         return self.brain.pairings
 
