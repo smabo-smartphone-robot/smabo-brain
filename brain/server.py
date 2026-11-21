@@ -10,7 +10,7 @@
           /webrtc/* は brain が受け取る。それ以外は esp32 へ。
   app   → /webrtc/offer, /webrtc/app_ice, /speech/audio は brain が受け取る。
           それ以外は web へ。
-  esp32 → /wheel_vel は積分して /odom を web へ。/config は brain も受け取り
+  esp32 → /wheel_vel は積分して /odom を web へ（/wheel_vel 自体も web へ）。/config は brain も受け取り
           （オドメトリ用）、変更の知らせとして web へも流す。それ以外は web へ。
 
 設定は機器の REST（ESP32 は :80、スマホは :8081 の GET/POST /config）にある。
@@ -375,6 +375,8 @@ class Brain:
                                     dt=msg.get("dt", 0.0))
             if r is not None:
                 await self.clients.send("web", frames.odom(r))
+            # the wheel speeds too, so a browser can check each wheel's encoder
+            await self.clients.send("web", json.dumps(frame))
         elif topic == "/config":
             # 車輪の寸法・共分散・frame 名（オドメトリ用）と実在関節名（画像処理の
             # 首振り用）の同期に使う。web へは「設定が変わった」知らせとして流す
