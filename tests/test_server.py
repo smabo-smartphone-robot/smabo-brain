@@ -134,7 +134,29 @@ def test_esp32_config_sets_odometry_reaches_web_and_wheel_vel_becomes_odom():
             assert [f for f in got if f.get("topic") == "/config"]
             odom = [f for f in got if f.get("topic") == "/odom"]
             assert odom and abs(odom[-1]["msg"]["twist"]["twist"]["angular"]["z"] - 0.4) < 1e-6
+            # and the wheel speeds themselves, under their canonical name
+            wheel = [f for f in got if f.get("topic") == "/wheel_vel"]
+            assert wheel and wheel[-1]["msg"] == {"left": -0.1, "right": 0.1, "dt": 0.1}
             assert client.app[BRAIN_KEY].vision.joints == {"head_pan"}
+        finally:
+            await client.close()
+    run(go())
+
+
+def test_esp32_scan_reaches_web():
+    async def go():
+        client = await _client()
+        try:
+            esp = await _connect_esp32(client)
+            web = await _connect_web(client)
+            await asyncio.sleep(0.05)
+            await _recv_all(web)
+            scan = {"header": {"frame_id": "laser"}, "angle_min": 0.0, "angle_max": 6.2,
+                    "angle_increment": 0.0175, "range_min": 0.05, "range_max": 12.0,
+                    "ranges": [1.0, 0.0, 2.5]}
+            await esp.send_json({"op": "publish", "topic": "/esp32/scan", "msg": scan})
+            got = [f for f in await _recv_all(web) if f.get("topic") == "/scan"]
+            assert got and got[-1]["msg"] == scan
         finally:
             await client.close()
     run(go())

@@ -18,6 +18,7 @@ PUBLISH: dict[str, dict[str, str]] = {
         "/initialpose":       "geometry_msgs/msg/PoseWithCovarianceStamped",
         "/goal_pose":         "geometry_msgs/msg/PoseStamped",
         "/nav/command":       "std_msgs/msg/String",
+        "/mode/command":      "std_msgs/msg/String",
         "/speech/say":        "std_msgs/msg/String",
         "/expression":        "std_msgs/msg/String",
         "/look_at":           "geometry_msgs/msg/PoseStamped",
@@ -52,6 +53,8 @@ PUBLISH: dict[str, dict[str, str]] = {
 SUBSCRIBE: dict[str, dict[str, str]] = {
     "web": {
         "/odom":              "nav_msgs/msg/Odometry",
+        "/wheel_vel":         "smabo_interfaces/msg/WheelVel",
+        "/scan":              "sensor_msgs/msg/LaserScan",
         "/pong":              "std_msgs/msg/String",
         "/speech/recognized": "std_msgs/msg/String",
         "/imu/data":          "sensor_msgs/msg/Imu",
@@ -81,6 +84,6 @@ SUBSCRIBE: dict[str, dict[str, str]] = {
     },
 }
 
-ROS_ONLY_TOPICS: frozenset[str] = frozenset({"/goal_pose", "/initialpose", "/nav/command"})
+ROS_ONLY_TOPICS: frozenset[str] = frozenset({"/goal_pose", "/initialpose", "/nav/command", "/mode/command"})
 APP_TOPICS: frozenset[str] = frozenset({"/expression", "/look_at", "/speech/say"})
 FROM_BRAIN: frozenset[str] = frozenset({"/odom", "/brain/info", "/vision/config", "/vision/detections", "/vision/markers", "/speech/recognized", "/webrtc/web_offer", "/webrtc/answer"})

@@ -35,7 +35,7 @@ import logging
 log = logging.getLogger(__name__)
 
 try:
-    from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
+    from aiortc import RTCPeerConnection, RTCSessionDescription
     from aiortc.contrib.media import MediaRelay
     from aiortc.sdp import candidate_from_sdp
     HAVE_AIORTC = True

@@ -502,20 +502,6 @@ def to_detection2darray(detections, frame_id, stamp, img_wh=None):
     return out
 
 
-def detections_from_detection2darray(msg: dict):
-    """Inverse of ``to_detection2darray`` — used by the policy consumers."""
-    out = []
-    for d in (msg or {}).get("detections", []):
-        bbox = d.get("bbox") or {}
-        ctr = (bbox.get("center") or {}).get("position") or {}
-        res = (d.get("results") or [{}])[0].get("hypothesis") or {}
-        out.append(_det(res.get("class_id", ""), res.get("score", 1.0),
-                        ctr.get("x", 0.0), ctr.get("y", 0.0),
-                        bbox.get("size_x", 0.0), bbox.get("size_y", 0.0)))
-    wh = (msg.get("source_img_width"), msg.get("source_img_height"))
-    return out, (wh if all(v is not None for v in wh) else None)
-
-
 # ---------------------------------------------------------------------------
 # Policy: pick a target, project to a direction, drive look_at / servo
 # ---------------------------------------------------------------------------
