@@ -1,5 +1,10 @@
 # smabo-brain
 
+> **smabo（スマボ）** は、手のひらサイズのスマホロボット（スマートフォンロボット）です。手持ちのスマホが顔とセンサーになり、工具なしでブロックのように組み立てられます。
+> このリポジトリは smabo の中継・処理サーバ（Python）です。使い方は [製作ガイド](https://smabo-smartphone-robot.github.io/guides/smabo-brain/)、ほかのリポジトリは [smabo-smartphone-robot](https://github.com/smabo-smartphone-robot) を見てください。
+>
+> *smabo is a palm-sized smartphone robot: your phone becomes its face and sensors, and it snaps together without tools. This repository is the hub server (Python). Guides: [smabo-smartphone-robot.github.io](https://smabo-smartphone-robot.github.io/)*
+
 smabo システムの中継・処理サーバ（Python / aiohttp）。
 
 全コンポーネントが WebSocket クライアントとして接続してくる唯一のサーバで、
